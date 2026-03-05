@@ -1,8 +1,5 @@
-import asyncio
 import os
 import json
-import sys
-import base64
 import mimetypes
 import httpx
 from typing import Optional
@@ -14,6 +11,7 @@ from mcp.client.stdio import stdio_client
 
 # 加载 .env 文件，确保 API Key 受到保护
 load_dotenv()
+
 
 class MCPClient:
     def __init__(self):
@@ -78,10 +76,10 @@ class MCPClient:
 
     async def process_query(self, query: str, file_path: str = "") -> str:
         """使用大模型处理查询并调用可用的 MCP 工具"""
-        user_content = []
+        user_prompt_parts = []
 
         if query:
-            user_content.append({"type": "text", "text": query})
+            user_prompt_parts.append(query)
 
         if file_path:
             if not os.path.exists(file_path):
@@ -89,37 +87,32 @@ class MCPClient:
 
             mime_type, _ = mimetypes.guess_type(file_path)
             mime_type = mime_type or "application/octet-stream"
+            filename = os.path.basename(file_path)
 
             if mime_type.startswith("image/"):
-                with open(file_path, "rb") as f:
-                    image_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-                user_content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{image_base64}"
-                        }
-                    }
+                file_size = os.path.getsize(file_path)
+                user_prompt_parts.append(
+                    f"用户上传了一张图片：{filename}（MIME: {mime_type}, 大小: {file_size} bytes）。"
+                )
+                user_prompt_parts.append(
+                    "当前接入的模型接口仅支持文本消息，无法直接读取图片像素内容。"
+                    "请先基于用户问题给出可执行建议，并提示用户改为上传可读文本（如 txt/md）或补充图片文字描述。"
                 )
             else:
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         file_text = f.read()
                 except UnicodeDecodeError:
-                    return "当前仅支持图片或 UTF-8 编码的文本文件解析。"
+                    return "当前模型接口仅支持文本消息。非 UTF-8 文本文件请先转换为 UTF-8，或粘贴主要内容后再试。"
 
-                user_content.append(
-                    {
-                        "type": "text",
-                        "text": f"以下是用户上传文件（{os.path.basename(file_path)}）的内容，请进行解析并总结：\n{file_text}"
-                    }
+                user_prompt_parts.append(
+                    f"以下是用户上传文件（{filename}）的内容，请进行解析并总结：\n{file_text}"
                 )
 
-        if not user_content:
+        if not user_prompt_parts:
             return "请输入问题或上传文件后再发送。"
 
-        messages = [{"role": "user", "content": user_content}]
+        messages = [{"role": "user", "content": "\n\n".join(user_prompt_parts)}]
 
         try:
             response = await self.session.list_tools()
