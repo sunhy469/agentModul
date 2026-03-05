@@ -40,6 +40,7 @@ class MCPClient:
         )
 
         self.session: Optional[ClientSession] = None
+        self.asr_client: Optional[OpenAI] = None
 
     async def connect_to_server(self, server_script_path: str):
         """连接到 MCP 服务器并列出可用工具"""
@@ -87,25 +88,64 @@ class MCPClient:
         return any(t in q for t in triggers) and any(a in q for a in actions)
 
 
+    def _get_asr_client(self, force_official: bool = False) -> OpenAI:
+        """获取语音识别客户端，支持单独配置 ASR 服务。"""
+        asr_key = os.getenv("ASR_OPENAI_API_KEY") or self.openai_api_key
+        asr_base_url = os.getenv("ASR_OPENAI_BASE_URL")
+
+        if force_official:
+            asr_base_url = "https://api.openai.com/v1"
+
+        if not asr_base_url:
+            asr_base_url = self.base_url
+
+        http_client = httpx.Client(
+            base_url=asr_base_url,
+            timeout=90.0,
+            follow_redirects=True,
+        )
+
+        return OpenAI(api_key=asr_key, http_client=http_client)
+
     async def transcribe_audio_file(self, audio_path: str) -> str:
         """将音频文件转写为文本。"""
         if not os.path.exists(audio_path):
             return "语音文件不存在，请重新选择后再试。"
 
-        try:
-            asr_model = os.getenv("ASR_MODEL", "whisper-1")
+        asr_model = os.getenv("ASR_MODEL", "gpt-4o-mini-transcribe")
+
+        def _do_transcribe(client: OpenAI) -> str:
             with open(audio_path, "rb") as audio_file:
-                response = self.client.audio.transcriptions.create(
+                response = client.audio.transcriptions.create(
                     model=asr_model,
                     file=audio_file,
                 )
+            return (getattr(response, "text", "") or "").strip()
 
-            text = getattr(response, "text", "")
-            if not text:
-                return "未识别到语音内容，请重试。"
-
-            return text.strip()
+        try:
+            client = self._get_asr_client(force_official=False)
+            text = _do_transcribe(client)
+            if text:
+                return text
+            return "未识别到语音内容，请重试。"
         except Exception as e:
+            err_text = str(e)
+
+            # 兼容只支持 chat 接口的中转服务：404 时自动回退到 OpenAI 官方 ASR 端点
+            if "404" in err_text and not os.getenv("ASR_OPENAI_BASE_URL"):
+                try:
+                    fallback_client = self._get_asr_client(force_official=True)
+                    text = _do_transcribe(fallback_client)
+                    if text:
+                        return text
+                    return "未识别到语音内容，请重试。"
+                except Exception as fallback_error:
+                    return (
+                        "语音识别失败（当前模型网关不支持 audio/transcriptions）。"
+                        f"原始错误: {e}；官方端点回退也失败: {fallback_error}。"
+                        "可在 .env 配置 ASR_OPENAI_BASE_URL 和 ASR_OPENAI_API_KEY。"
+                    )
+
             return f"语音识别失败: {e}"
 
     async def process_query(self, query: str, file_path: str = "") -> str:
