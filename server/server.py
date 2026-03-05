@@ -358,6 +358,77 @@ def search_web(query: str, engine: str = "bing") -> str:
     return f"尝试打开浏览器失败，请手动访问：{url}"
 
 
+
+
+def _open_with_default_app(target: Path) -> None:
+    """按系统默认方式打开文件。"""
+    system_name = platform.system().lower()
+    if system_name == "windows":
+        os.startfile(str(target))
+    elif system_name == "darwin":
+        subprocess.Popen(["open", str(target)])
+    else:
+        subprocess.Popen(["xdg-open", str(target)])
+
+
+@mcp.tool()
+def read_file(file_path: str, open_with_default: bool = True) -> str:
+    """
+    读取并（可选）按系统默认方式打开文件。
+    :param file_path: 文件完整路径
+    :param open_with_default: 是否按默认应用打开（默认 True）
+    """
+    try:
+        if not file_path.strip():
+            return "请提供文件路径。"
+
+        target = Path(file_path).expanduser().resolve()
+        if not target.exists() or not target.is_file():
+            return f"文件不存在：{target}"
+
+        if open_with_default:
+            _open_with_default_app(target)
+            return f"已按系统默认方式打开文件：{target}"
+
+        # 兼容部分请求：如果不打开则返回内容摘要
+        content = _safe_read_file(target)
+        return f"文件路径：{target}\n文件内容：\n{content}"
+    except Exception as e:
+        return f"读取或打开文件失败: {e}"
+
+
+@mcp.tool()
+def open_local_file_by_name(filename: str, directory: str = "") -> str:
+    """
+    在本地目录按文件名关键字查找并按系统默认方式打开第一个匹配文件。
+    :param filename: 文件名或关键字
+    :param directory: 搜索目录（为空时用默认目录）
+    """
+    try:
+        keyword = filename.strip().lower()
+        if not keyword:
+            return "请提供文件名或关键字。"
+
+        search_root = _resolve_search_root(directory)
+        if not search_root.exists() or not search_root.is_dir():
+            return f"目录无效：{search_root}"
+
+        candidates = [
+            p for p in search_root.rglob("*")
+            if p.is_file() and keyword in p.name.lower()
+        ]
+
+        if not candidates:
+            return f"未找到包含关键字“{filename}”的文件。搜索目录：{search_root}"
+
+        exact = [p for p in candidates if p.name.lower() == keyword]
+        target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
+
+        _open_with_default_app(target)
+        return f"已按系统默认方式打开文件：{target}"
+    except Exception as e:
+        return f"查找或打开文件失败: {e}"
+
 @mcp.tool()
 def open_path_in_file_manager(target_path: str = "") -> str:
     """
