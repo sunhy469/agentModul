@@ -1,7 +1,11 @@
 import json
 import os
+import platform
+import subprocess
+import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import httpx
 from docx import Document
@@ -105,7 +109,7 @@ def format_weather(data: dict[str, Any] | str) -> str:
 @mcp.tool()
 def create_word_file(filename: str, content: str) -> str:
     """
-    输入指定城市的英文名称，返回今日天气查询结果。
+    根据文件名和内容创建 Word 文件。
     :filename : 文件名
     :content: 内容
     """
@@ -155,6 +159,12 @@ def _safe_read_file(file_path: Path, max_chars: int = 12000) -> str:
     return content
 
 
+def _resolve_search_root(directory: str = "") -> Path:
+    if directory.strip():
+        return Path(directory).expanduser().resolve()
+    return Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).resolve()
+
+
 @mcp.tool()
 def find_and_read_local_file(filename: str, requirement: str = "") -> str:
     """
@@ -164,7 +174,7 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
     :return: 文件定位与内容
     """
     try:
-        search_root = Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).resolve()
+        search_root = _resolve_search_root()
 
         if not search_root.exists() or not search_root.is_dir():
             return f"本地搜索目录无效：{search_root}"
@@ -202,6 +212,111 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
 
     except Exception as e:
         return f"查找或读取文件失败: {e}"
+
+
+@mcp.tool()
+def open_local_application(app_command: str, arguments: str = "") -> str:
+    """
+    打开本地应用（通过命令行）。
+    :param app_command: 应用启动命令，例如 notepad、calc、code
+    :param arguments: 可选启动参数
+    """
+    try:
+        cmd = f"{app_command} {arguments}".strip()
+        if not cmd:
+            return "请提供应用启动命令。"
+
+        subprocess.Popen(cmd, shell=True)
+        return f"已尝试启动应用：{cmd}"
+    except Exception as e:
+        return f"启动应用失败: {e}"
+
+
+@mcp.tool()
+def search_web(query: str, engine: str = "bing") -> str:
+    """
+    在默认浏览器中执行搜索。
+    :param query: 搜索关键词
+    :param engine: 搜索引擎（bing/google/baidu）
+    """
+    query = query.strip()
+    if not query:
+        return "请提供搜索关键词。"
+
+    engine_map = {
+        "bing": "https://www.bing.com/search?q={}",
+        "google": "https://www.google.com/search?q={}",
+        "baidu": "https://www.baidu.com/s?wd={}"
+    }
+    template = engine_map.get(engine.lower(), engine_map["bing"])
+    url = template.format(quote_plus(query))
+
+    ok = webbrowser.open(url)
+    if ok:
+        return f"已在浏览器打开搜索：{url}"
+    return f"尝试打开浏览器失败，请手动访问：{url}"
+
+
+@mcp.tool()
+def open_path_in_file_manager(target_path: str = "") -> str:
+    """
+    在系统文件管理器中打开目录或文件。
+    :param target_path: 目标路径，留空则打开 BASE_DIR
+    """
+    try:
+        target = Path(target_path).expanduser().resolve() if target_path.strip() else Path(BASE_DIR).resolve()
+
+        if not target.exists():
+            return f"目标路径不存在：{target}"
+
+        system_name = platform.system().lower()
+        if system_name == "windows":
+            os.startfile(str(target))
+        elif system_name == "darwin":
+            subprocess.Popen(["open", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+
+        return f"已在文件管理器打开：{target}"
+    except Exception as e:
+        return f"打开路径失败: {e}"
+
+
+@mcp.tool()
+def list_local_files(directory: str = "", keyword: str = "", limit: int = 20) -> str:
+    """
+    列出本地文件，便于后续让模型选择要读取的文件。
+    :param directory: 搜索目录，默认 LOCAL_SEARCH_DIR 或 BASE_DIR
+    :param keyword: 文件名过滤关键字
+    :param limit: 最多返回条数
+    """
+    try:
+        search_root = _resolve_search_root(directory)
+        if not search_root.exists() or not search_root.is_dir():
+            return f"目录无效：{search_root}"
+
+        kw = keyword.strip().lower()
+        matches = []
+        for p in search_root.rglob("*"):
+            if not p.is_file():
+                continue
+            if kw and kw not in p.name.lower():
+                continue
+            matches.append(p)
+
+        if not matches:
+            return f"目录中未找到匹配文件。目录：{search_root}"
+
+        limit = max(1, min(limit, 100))
+        selected = sorted(matches, key=lambda x: str(x))[:limit]
+
+        lines = [f"搜索目录：{search_root}", f"匹配数量：{len(matches)}（展示前 {len(selected)} 条）"]
+        for idx, item in enumerate(selected, 1):
+            lines.append(f"{idx}. {item.name} | {item}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"列出文件失败: {e}"
 
 
 @mcp.tool()
