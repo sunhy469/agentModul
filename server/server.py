@@ -1,6 +1,8 @@
 import json
 import os
 import platform
+import shlex
+import shutil
 import subprocess
 import webbrowser
 from pathlib import Path
@@ -214,20 +216,119 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
         return f"查找或读取文件失败: {e}"
 
 
+
+
+def _resolve_windows_app_path(app_command: str) -> str:
+    """在 Windows 上尝试解析常见应用别名与安装路径。"""
+    alias_map = {
+        "qq": ["QQScLauncher.exe", "QQ.exe", "QQNT.exe"],
+        "wechat": ["WeChat.exe"],
+        "weixin": ["WeChat.exe"],
+        "chrome": ["chrome.exe"],
+        "edge": ["msedge.exe"],
+    }
+
+    raw = app_command.strip().strip('"')
+    lower_name = raw.lower()
+
+    # 已经是路径
+    direct_path = Path(raw).expanduser()
+    if direct_path.exists() and direct_path.is_file():
+        return str(direct_path.resolve())
+
+    # 先走 PATH
+    which_path = shutil.which(raw)
+    if which_path:
+        return which_path
+
+    candidates = []
+    if lower_name in alias_map:
+        candidates.extend(alias_map[lower_name])
+
+    if lower_name.endswith('.exe'):
+        candidates.append(raw)
+    else:
+        candidates.extend([raw, f"{raw}.exe"])
+
+    roots = [
+        Path(os.getenv("ProgramFiles", "C:/Program Files")),
+        Path(os.getenv("ProgramFiles(x86)", "C:/Program Files (x86)")),
+        Path(os.getenv("LOCALAPPDATA", "")),
+    ]
+
+    # 针对 QQ 的高频目录先做快速定位
+    qq_fast_paths = [
+        "Tencent/QQ/Bin/QQScLauncher.exe",
+        "Tencent/QQ/Bin/QQ.exe",
+        "Tencent/QQNT/QQ.exe",
+        "Tencent/QQNT/QQNT.exe",
+    ]
+    if lower_name == "qq":
+        for root in roots:
+            for rel in qq_fast_paths:
+                candidate = root / rel
+                if candidate.exists():
+                    return str(candidate.resolve())
+
+    # 通用浅层搜索（限制层级，避免太慢）
+    for root in roots:
+        if not root.exists():
+            continue
+        for exe_name in candidates:
+            try:
+                for current_root, dirs, files in os.walk(root):
+                    # 限制搜索深度
+                    depth = Path(current_root).relative_to(root).parts
+                    if len(depth) > 4:
+                        dirs[:] = []
+                        continue
+                    for f in files:
+                        if f.lower() == exe_name.lower():
+                            return str((Path(current_root) / f).resolve())
+            except Exception:
+                continue
+
+    return ""
+
+
+def _build_launch_command(app_command: str, arguments: str = "") -> list[str]:
+    """构造安全的启动命令，避免 shell 注入。"""
+    system_name = platform.system().lower()
+    raw = app_command.strip()
+    if not raw:
+        return []
+
+    if system_name == "windows":
+        executable = _resolve_windows_app_path(raw) or raw
+        args = shlex.split(arguments, posix=False) if arguments.strip() else []
+        return [executable, *args]
+
+    executable = shutil.which(raw) or raw
+    args = shlex.split(arguments) if arguments.strip() else []
+    return [executable, *args]
+
+
 @mcp.tool()
 def open_local_application(app_command: str, arguments: str = "") -> str:
     """
     打开本地应用（通过命令行）。
-    :param app_command: 应用启动命令，例如 notepad、calc、code
+    :param app_command: 应用启动命令，例如 qq、notepad、calc、code
     :param arguments: 可选启动参数
     """
     try:
-        cmd = f"{app_command} {arguments}".strip()
-        if not cmd:
+        launch_cmd = _build_launch_command(app_command, arguments)
+        if not launch_cmd:
             return "请提供应用启动命令。"
 
-        subprocess.Popen(cmd, shell=True)
-        return f"已尝试启动应用：{cmd}"
+        subprocess.Popen(launch_cmd, shell=False)
+        return f"已尝试启动应用：{' '.join(launch_cmd)}"
+    except FileNotFoundError:
+        return (
+            "未找到可执行程序。可尝试：\n"
+            "1) 直接传完整 exe 路径；\n"
+            "2) 使用常见别名（如 qq/wechat/chrome）；\n"
+            "3) 将应用目录加入系统 PATH。"
+        )
     except Exception as e:
         return f"启动应用失败: {e}"
 
