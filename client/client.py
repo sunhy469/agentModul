@@ -86,6 +86,28 @@ class MCPClient:
         actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]
         return any(t in q for t in triggers) and any(a in q for a in actions)
 
+
+    async def transcribe_audio_file(self, audio_path: str) -> str:
+        """将音频文件转写为文本。"""
+        if not os.path.exists(audio_path):
+            return "语音文件不存在，请重新选择后再试。"
+
+        try:
+            asr_model = os.getenv("ASR_MODEL", "whisper-1")
+            with open(audio_path, "rb") as audio_file:
+                response = self.client.audio.transcriptions.create(
+                    model=asr_model,
+                    file=audio_file,
+                )
+
+            text = getattr(response, "text", "")
+            if not text:
+                return "未识别到语音内容，请重试。"
+
+            return text.strip()
+        except Exception as e:
+            return f"语音识别失败: {e}"
+
     async def process_query(self, query: str, file_path: str = "") -> str:
         """使用大模型处理查询并调用可用的 MCP 工具"""
         user_prompt_parts = []

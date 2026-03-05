@@ -16,6 +16,7 @@ from PySide6.QtGui import QIcon
 class MainWindow(QMainWindow):
 
     result_signal = Signal(str)
+    voice_signal = Signal(str)
 
     def __init__(self, mcpClient, loop):
         super().__init__()
@@ -24,6 +25,7 @@ class MainWindow(QMainWindow):
         self.mcpClient = mcpClient
         self.loop = loop
         self.result_signal.connect(self.show_ai_result)
+        self.voice_signal.connect(self.on_voice_transcribed)
         self.setWindowIcon(QIcon("icon.png"))
         self.init_ui()
 
@@ -200,6 +202,11 @@ class MainWindow(QMainWindow):
         upload_button.setMinimumWidth(130)
         upload_button.clicked.connect(self.select_file)
 
+        voice_button = QPushButton("语音输入")
+        voice_button.setObjectName("AssistButton")
+        voice_button.setMinimumWidth(110)
+        voice_button.clicked.connect(self.select_audio_and_transcribe)
+
         self.file_path_label = QLabel("未选择文件")
         self.file_path_label.setStyleSheet(
             "font-size: 12px; color: #5f6b7a; background: #f7f9fc; border: 1px solid #e3e8f2;"
@@ -207,6 +214,7 @@ class MainWindow(QMainWindow):
         )
 
         file_layout.addWidget(upload_button)
+        file_layout.addWidget(voice_button)
         file_layout.addWidget(self.file_path_label, 1)
 
         # 操作按钮
@@ -301,6 +309,47 @@ class MainWindow(QMainWindow):
             self.selected_file_path = file_path
             self.file_path_label.setText(os.path.basename(file_path))
             self.status_label.setText("文件已选择，点击发送进行解析")
+
+    def select_audio_and_transcribe(self):
+        """选择音频并进行语音识别，识别后自动发送给模型。"""
+        audio_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择语音文件",
+            "",
+            "音频文件 (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.webm);;所有文件 (*)"
+        )
+
+        if audio_path:
+            self.status_label.setText("正在识别语音，请稍候...")
+            self.add_to_history(f"用户上传语音: {os.path.basename(audio_path)}", role="user")
+            future = asyncio.run_coroutine_threadsafe(
+                self.mcpClient.transcribe_audio_file(audio_path),
+                self.loop
+            )
+            future.add_done_callback(self.handle_voice_result)
+
+    def handle_voice_result(self, future):
+        try:
+            text = future.result()
+        except Exception as e:
+            text = f"语音识别失败: {e}"
+
+        self.voice_signal.emit(text)
+
+    def on_voice_transcribed(self, transcribed_text):
+        if not transcribed_text:
+            self.status_label.setText("语音识别失败，请重试")
+            return
+
+        if transcribed_text.startswith("语音识别失败") or transcribed_text.startswith("语音文件不存在"):
+            self.status_label.setText(transcribed_text)
+            self.add_to_history(f"AI: {transcribed_text}", role="ai")
+            return
+
+        self.text_input.setPlainText(transcribed_text)
+        self.status_label.setText("语音识别完成，正在发送请求...")
+        self.add_to_history(f"语音识别结果: {transcribed_text}", role="user")
+        self.send_message()
 
     def add_to_history(self, message, role="user"):
         """添加消息到历史区域"""
