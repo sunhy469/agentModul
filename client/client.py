@@ -1,7 +1,6 @@
-import asyncio
 import os
 import json
-import sys
+import mimetypes
 import httpx
 from typing import Optional
 from contextlib import AsyncExitStack
@@ -12,6 +11,7 @@ from mcp.client.stdio import stdio_client
 
 # 加载 .env 文件，确保 API Key 受到保护
 load_dotenv()
+
 
 class MCPClient:
     def __init__(self):
@@ -74,9 +74,45 @@ class MCPClient:
         print("\n 已连接到服务器，支持以下工具:", [tool.name for tool in tools])
         return tools
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str, file_path: str = "") -> str:
         """使用大模型处理查询并调用可用的 MCP 工具"""
-        messages = [{"role": "user", "content": query}]
+        user_prompt_parts = []
+
+        if query:
+            user_prompt_parts.append(query)
+
+        if file_path:
+            if not os.path.exists(file_path):
+                return "上传的文件不存在，请重新选择后再试。"
+
+            mime_type, _ = mimetypes.guess_type(file_path)
+            mime_type = mime_type or "application/octet-stream"
+            filename = os.path.basename(file_path)
+
+            if mime_type.startswith("image/"):
+                file_size = os.path.getsize(file_path)
+                user_prompt_parts.append(
+                    f"用户上传了一张图片：{filename}（MIME: {mime_type}, 大小: {file_size} bytes）。"
+                )
+                user_prompt_parts.append(
+                    "当前接入的模型接口仅支持文本消息，无法直接读取图片像素内容。"
+                    "请先基于用户问题给出可执行建议，并提示用户改为上传可读文本（如 txt/md）或补充图片文字描述。"
+                )
+            else:
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        file_text = f.read()
+                except UnicodeDecodeError:
+                    return "当前模型接口仅支持文本消息。非 UTF-8 文本文件请先转换为 UTF-8，或粘贴主要内容后再试。"
+
+                user_prompt_parts.append(
+                    f"以下是用户上传文件（{filename}）的内容，请进行解析并总结：\n{file_text}"
+                )
+
+        if not user_prompt_parts:
+            return "请输入问题或上传文件后再发送。"
+
+        messages = [{"role": "user", "content": "\n\n".join(user_prompt_parts)}]
 
         try:
             response = await self.session.list_tools()
