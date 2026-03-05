@@ -74,6 +74,18 @@ class MCPClient:
         print("\n 已连接到服务器，支持以下工具:", [tool.name for tool in tools])
         return tools
 
+
+
+    def _is_browser_search_explicit(self, query: str) -> bool:
+        """仅当用户明确要求在浏览器中搜索时，才允许调用 search_web 工具。"""
+        q = (query or "").lower()
+        triggers = [
+            "在浏览器", "浏览器中", "打开浏览器", "用浏览器", "browser",
+            "search_web", "网页搜索", "上网搜", "去搜索引擎"
+        ]
+        actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]
+        return any(t in q for t in triggers) and any(a in q for a in actions)
+
     async def process_query(self, query: str, file_path: str = "") -> str:
         """使用大模型处理查询并调用可用的 MCP 工具"""
         user_prompt_parts = []
@@ -116,17 +128,22 @@ class MCPClient:
 
         try:
             response = await self.session.list_tools()
-            available_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.inputSchema
+            allow_browser_search = self._is_browser_search_explicit(query)
+            available_tools = []
+            for tool in response.tools:
+                if tool.name == "search_web" and not allow_browser_search:
+                    continue
+
+                available_tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.inputSchema
+                        }
                     }
-                }
-                for tool in response.tools
-            ]
+                )
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -141,6 +158,9 @@ class MCPClient:
                 tool_call = content.message.tool_calls[0]
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
+
+                if tool_name == "search_web" and not self._is_browser_search_explicit(query):
+                    return "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
 
                 # 执行工具
                 result = await self.session.call_tool(tool_name, tool_args)
