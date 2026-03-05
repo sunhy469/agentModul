@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -188,6 +189,54 @@ def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | No
     exact = [p for p in candidates if p.name.lower() == keyword]
     target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
     return target, ""
+
+
+
+
+def _contains_any(text: str, keywords: list[str]) -> bool:
+    return any(k in text for k in keywords)
+
+
+def _extract_filename_keyword(instruction: str) -> str:
+    patterns = [
+        r"(?:名字为|名为|叫|文件名为)\s*([\w\-.一-鿿]+)",
+        r"(?:查找|找到|搜索)\s*([\w\-.一-鿿]+)\s*(?:文件|文本)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, instruction)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _extract_export_name(instruction: str) -> str:
+    m = re.search(r"(?:命名为|保存为|叫)\s*([\w\-.一-鿿]+)", instruction)
+    if m:
+        return m.group(1).strip()
+    return "complex_result"
+
+
+def _extract_search_query(instruction: str) -> str:
+    m = re.search(r"(?:搜索|查一下|搜一下)\s*[：: ]*([^。\n]+)", instruction)
+    if m:
+        return m.group(1).strip()
+    return instruction.strip()
+
+
+def _extract_app_command(instruction: str) -> str:
+    lowered = instruction.lower()
+    app_alias = {
+        "qq": ["qq", "打开qq"],
+        "wechat": ["微信", "wechat", "weixin"],
+        "notepad": ["记事本", "notepad"],
+        "calc": ["计算器", "calc"],
+        "chrome": ["chrome", "谷歌浏览器"],
+        "edge": ["edge", "微软浏览器"],
+    }
+    for app, words in app_alias.items():
+        if any(w in lowered for w in words):
+            return app
+    return ""
 
 
 @mcp.tool()
@@ -471,6 +520,93 @@ def list_local_files(directory: str = "", keyword: str = "", limit: int = 20) ->
     except Exception as e:
         return f"列出文件失败: {e}"
 
+
+
+
+@mcp.tool()
+def execute_complex_instruction(instruction: str, directory: str = "", auto_open: bool = True) -> str:
+    """
+    执行复杂指令编排：支持多步骤（查找文件/读取/打开/导出/打开应用/浏览器搜索）。
+    为避免与单指令冲突，只有检测到多个动作意图时才执行。
+
+    :param instruction: 用户复杂指令原文
+    :param directory: 可选搜索目录（文件相关步骤）
+    :param auto_open: 文件步骤是否默认打开文件
+    """
+    try:
+        raw = instruction.strip()
+        if not raw:
+            return "请提供复杂指令内容。"
+
+        lowered = raw.lower()
+        intents = {
+            "file": _contains_any(raw, ["查找", "找到", "搜索"]) and _contains_any(raw, ["文件", "文本", "doc", "txt"]),
+            "open": _contains_any(raw, ["打开", "启动"]),
+            "summary": _contains_any(raw, ["总结", "摘要", "要点", "解析"]),
+            "export": _contains_any(raw, ["生成word", "导出word", "保存word", "写入word", "生成文档"]),
+            "web": _contains_any(raw, ["浏览器", "网页"]) and _contains_any(raw, ["搜索", "查一下", "搜一下"]),
+            "app": _contains_any(raw, ["打开", "启动"]) and _contains_any(lowered, ["qq", "wechat", "weixin", "notepad", "calc", "chrome", "edge", "应用", "软件"]),
+        }
+
+        intent_count = sum(1 for v in intents.values() if v)
+        if intent_count < 2:
+            return (
+                "检测到这是单指令或低复杂度请求，为避免与单工具冲突，"
+                "请直接使用对应工具（如 read_file/open_local_application/find_and_read_local_file）。"
+            )
+
+        steps: list[str] = [f"复杂指令识别成功：{raw}"]
+        content_cache = ""
+
+        # 文件相关步骤
+        if intents["file"]:
+            filename = _extract_filename_keyword(raw)
+            if filename:
+                target, err = _find_file_by_keyword(filename, directory)
+                if err:
+                    steps.append(f"[文件步骤失败] {err}")
+                else:
+                    if auto_open and intents["open"]:
+                        _open_with_default_app(target)
+                        steps.append(f"[步骤1] 已按默认方式打开文件：{target}")
+                    else:
+                        steps.append(f"[步骤1] 已定位文件：{target}")
+
+                    content_cache = _safe_read_file(target)
+                    steps.append(f"[步骤2] 已读取文件内容（长度 {len(content_cache)}）")
+            else:
+                steps.append("[文件步骤] 未从指令中提取到明确文件名关键字。")
+
+        # 应用相关步骤
+        if intents["app"]:
+            app_cmd = _extract_app_command(raw)
+            if app_cmd:
+                app_result = open_local_application(app_cmd, "")
+                steps.append(f"[应用步骤] {app_result}")
+            else:
+                steps.append("[应用步骤] 未解析出明确应用名称。")
+
+        # 浏览器搜索步骤（仅明确浏览器意图）
+        if intents["web"]:
+            query = _extract_search_query(raw)
+            web_result = search_web(query, "bing")
+            steps.append(f"[搜索步骤] {web_result}")
+
+        # 导出步骤
+        if intents["export"] and content_cache:
+            export_name = _extract_export_name(raw)
+            export_text = content_cache[:3000]
+            export_result = create_word_file(export_name, export_text)
+            steps.append(f"[导出步骤] {export_result}")
+
+        # 总结提示步骤（交给模型最终回复阶段处理）
+        if intents["summary"] and content_cache:
+            steps.append("[总结步骤] 已准备文件内容，建议模型输出摘要/要点。")
+
+        return "\n".join(steps)
+
+    except Exception as e:
+        return f"复杂指令执行失败: {e}"
 
 @mcp.tool()
 async def query_weather(city: str) -> str:
