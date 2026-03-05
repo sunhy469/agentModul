@@ -1,6 +1,7 @@
 import os
 import json
 import mimetypes
+import shutil
 import httpx
 from typing import Optional
 from contextlib import AsyncExitStack
@@ -108,11 +109,12 @@ class MCPClient:
         return OpenAI(api_key=asr_key, http_client=http_client)
 
     async def transcribe_audio_file(self, audio_path: str) -> str:
-        """将音频文件转写为文本。"""
+        """将音频文件转写为文本。支持本地 whisper 与 API 两种方式。"""
         if not os.path.exists(audio_path):
             return "语音文件不存在，请重新选择后再试。"
 
         asr_model = os.getenv("ASR_MODEL", "gpt-4o-mini-transcribe")
+        asr_backend = os.getenv("ASR_BACKEND", "api").lower().strip()
 
         def _do_transcribe(client: OpenAI) -> str:
             with open(audio_path, "rb") as audio_file:
@@ -121,6 +123,32 @@ class MCPClient:
                     file=audio_file,
                 )
             return (getattr(response, "text", "") or "").strip()
+
+        def _do_local_whisper() -> str:
+            try:
+                import whisper  # type: ignore
+            except Exception as import_error:
+                return f"本地 whisper 不可用: {import_error}"
+
+            # whisper 依赖 ffmpeg，WinError 2 常见原因就是系统里找不到 ffmpeg
+            if shutil.which("ffmpeg") is None:
+                return "本地 whisper 缺少 ffmpeg（WinError 2）。请安装 ffmpeg 并加入 PATH，或改用 API 识别。"
+
+            local_model_name = os.getenv("LOCAL_WHISPER_MODEL", "base")
+            try:
+                model = whisper.load_model(local_model_name)
+                result = model.transcribe(audio_path)
+                return (result.get("text", "") or "").strip()
+            except FileNotFoundError:
+                return "本地 whisper 调用失败：系统找不到 ffmpeg（WinError 2）。"
+            except Exception as local_error:
+                return f"本地 whisper 识别失败: {local_error}"
+
+        if asr_backend == "whisper_local":
+            text = _do_local_whisper()
+            if text and not text.startswith("本地 whisper"):
+                return text
+            # 本地识别失败后回退 API
 
         try:
             client = self._get_asr_client(force_official=False)
