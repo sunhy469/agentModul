@@ -1,7 +1,6 @@
 import json
 import os
 import platform
-import re
 import shlex
 import shutil
 import subprocess
@@ -191,52 +190,6 @@ def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | No
     return target, ""
 
 
-
-
-def _contains_any(text: str, keywords: list[str]) -> bool:
-    return any(k in text for k in keywords)
-
-
-def _extract_filename_keyword(instruction: str) -> str:
-    patterns = [
-        r"(?:名字为|名为|叫|文件名为)\s*([\w\-.一-鿿]+)",
-        r"(?:查找|找到|搜索)\s*([\w\-.一-鿿]+)\s*(?:文件|文本)",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, instruction)
-        if m:
-            return m.group(1).strip()
-    return ""
-
-
-def _extract_export_name(instruction: str) -> str:
-    m = re.search(r"(?:命名为|保存为|叫)\s*([\w\-.一-鿿]+)", instruction)
-    if m:
-        return m.group(1).strip()
-    return "complex_result"
-
-
-def _extract_search_query(instruction: str) -> str:
-    m = re.search(r"(?:搜索|查一下|搜一下)\s*[：: ]*([^。\n]+)", instruction)
-    if m:
-        return m.group(1).strip()
-    return instruction.strip()
-
-
-def _extract_app_command(instruction: str) -> str:
-    lowered = instruction.lower()
-    app_alias = {
-        "qq": ["qq", "打开qq"],
-        "wechat": ["微信", "wechat", "weixin"],
-        "notepad": ["记事本", "notepad"],
-        "calc": ["计算器", "calc"],
-        "chrome": ["chrome", "谷歌浏览器"],
-        "edge": ["edge", "微软浏览器"],
-    }
-    for app, words in app_alias.items():
-        if any(w in lowered for w in words):
-            return app
-    return ""
 
 
 @mcp.tool()
@@ -524,87 +477,84 @@ def list_local_files(directory: str = "", keyword: str = "", limit: int = 20) ->
 
 
 @mcp.tool()
-def execute_complex_instruction(instruction: str, directory: str = "", auto_open: bool = True) -> str:
+def execute_complex_instruction(
+    instruction: str = "",
+    file_keyword: str = "",
+    directory: str = "",
+    open_file: bool = True,
+    read_content: bool = True,
+    requirement: str = "",
+    app_command: str = "",
+    app_arguments: str = "",
+    web_query: str = "",
+    web_engine: str = "bing",
+    export_word_name: str = "",
+    export_word_content: str = "",
+) -> str:
     """
-    执行复杂指令编排：支持多步骤（查找文件/读取/打开/导出/打开应用/浏览器搜索）。
-    为避免与单指令冲突，只有检测到多个动作意图时才执行。
+    执行复杂指令（结构化编排版）。
 
-    :param instruction: 用户复杂指令原文
-    :param directory: 可选搜索目录（文件相关步骤）
-    :param auto_open: 文件步骤是否默认打开文件
+    设计目标：由大模型先完成语义理解，将意图映射为参数；本工具只做稳定、可控的步骤执行，
+    避免在服务端做关键词匹配导致“看起来不智能”。
+
+    参数说明：
+    - instruction: 原始用户指令（用于记录）
+    - file_keyword: 需要查找的文件关键字（为空则跳过文件步骤）
+    - directory: 可选搜索目录
+    - open_file/read_content/requirement: 文件处理行为控制
+    - app_command/app_arguments: 应用启动步骤
+    - web_query/web_engine: 浏览器搜索步骤（仅当明确传入 web_query 时执行）
+    - export_word_name/export_word_content: 文档导出步骤
     """
     try:
-        raw = instruction.strip()
-        if not raw:
-            return "请提供复杂指令内容。"
+        steps: list[str] = []
+        if instruction.strip():
+            steps.append(f"复杂指令：{instruction.strip()}")
 
-        lowered = raw.lower()
-        intents = {
-            "file": _contains_any(raw, ["查找", "找到", "搜索"]) and _contains_any(raw, ["文件", "文本", "doc", "txt"]),
-            "open": _contains_any(raw, ["打开", "启动"]),
-            "summary": _contains_any(raw, ["总结", "摘要", "要点", "解析"]),
-            "export": _contains_any(raw, ["生成word", "导出word", "保存word", "写入word", "生成文档"]),
-            "web": _contains_any(raw, ["浏览器", "网页"]) and _contains_any(raw, ["搜索", "查一下", "搜一下"]),
-            "app": _contains_any(raw, ["打开", "启动"]) and _contains_any(lowered, ["qq", "wechat", "weixin", "notepad", "calc", "chrome", "edge", "应用", "软件"]),
-        }
-
-        intent_count = sum(1 for v in intents.values() if v)
-        if intent_count < 2:
-            return (
-                "检测到这是单指令或低复杂度请求，为避免与单工具冲突，"
-                "请直接使用对应工具（如 read_file/open_local_application/find_and_read_local_file）。"
-            )
-
-        steps: list[str] = [f"复杂指令识别成功：{raw}"]
         content_cache = ""
 
-        # 文件相关步骤
-        if intents["file"]:
-            filename = _extract_filename_keyword(raw)
-            if filename:
-                target, err = _find_file_by_keyword(filename, directory)
-                if err:
-                    steps.append(f"[文件步骤失败] {err}")
-                else:
-                    if auto_open and intents["open"]:
-                        _open_with_default_app(target)
-                        steps.append(f"[步骤1] 已按默认方式打开文件：{target}")
-                    else:
-                        steps.append(f"[步骤1] 已定位文件：{target}")
+        # 1) 文件查找/读取/打开
+        if file_keyword.strip():
+            target, err = _find_file_by_keyword(file_keyword, directory)
+            if err:
+                steps.append(f"[文件步骤失败] {err}")
+            else:
+                steps.append(f"[文件步骤] 已定位文件：{target}")
 
+                if open_file:
+                    _open_with_default_app(target)
+                    steps.append(f"[文件步骤] 已按默认应用打开：{target}")
+
+                if read_content:
                     content_cache = _safe_read_file(target)
-                    steps.append(f"[步骤2] 已读取文件内容（长度 {len(content_cache)}）")
-            else:
-                steps.append("[文件步骤] 未从指令中提取到明确文件名关键字。")
+                    steps.append(f"[文件步骤] 已读取内容（长度 {len(content_cache)}）")
 
-        # 应用相关步骤
-        if intents["app"]:
-            app_cmd = _extract_app_command(raw)
-            if app_cmd:
-                app_result = open_local_application(app_cmd, "")
-                steps.append(f"[应用步骤] {app_result}")
-            else:
-                steps.append("[应用步骤] 未解析出明确应用名称。")
+                if requirement.strip():
+                    steps.append(f"[文件步骤] 解析需求：{requirement.strip()}")
 
-        # 浏览器搜索步骤（仅明确浏览器意图）
-        if intents["web"]:
-            query = _extract_search_query(raw)
-            web_result = search_web(query, "bing")
+        # 2) 打开应用
+        if app_command.strip():
+            app_result = open_local_application(app_command, app_arguments)
+            steps.append(f"[应用步骤] {app_result}")
+
+        # 3) 浏览器搜索（由模型明确传入 web_query 才执行）
+        if web_query.strip():
+            web_result = search_web(web_query, web_engine)
             steps.append(f"[搜索步骤] {web_result}")
 
-        # 导出步骤
-        if intents["export"] and content_cache:
-            export_name = _extract_export_name(raw)
-            export_text = content_cache[:3000]
-            export_result = create_word_file(export_name, export_text)
+        # 4) 导出 Word
+        final_export_name = export_word_name.strip()
+        final_export_content = export_word_content.strip()
+        if final_export_name:
+            if not final_export_content:
+                final_export_content = content_cache[:3000] if content_cache else "（未提供导出内容）"
+            export_result = create_word_file(final_export_name, final_export_content)
             steps.append(f"[导出步骤] {export_result}")
 
-        # 总结提示步骤（交给模型最终回复阶段处理）
-        if intents["summary"] and content_cache:
-            steps.append("[总结步骤] 已准备文件内容，建议模型输出摘要/要点。")
+        if len(steps) == 0:
+            return "未接收到可执行的复杂步骤参数，请由模型先解析意图后传入结构化参数。"
 
         return "\n".join(steps)
-
     except Exception as e:
         return f"复杂指令执行失败: {e}"
 
