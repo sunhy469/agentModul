@@ -79,8 +79,8 @@ class MainWindow(QMainWindow):
             }
             QPushButton {
                 border: none;
-                border-radius: 12px;
-                padding: 9px 18px;
+                border-radius: 14px;
+                padding: 8px 12px;
                 font-size: 13px;
                 font-weight: 600;
             }
@@ -150,7 +150,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel("🤖 多模态智能助手")
         title_label.setObjectName("TitleLabel")
 
-        subtitle_label = QLabel("支持文本提问、文件上传与智能解析，让交互更自然。")
+        subtitle_label = QLabel("像 GPT 一样的对话布局：更大的会话区、更紧凑的输入区。")
         subtitle_label.setObjectName("SubTitleLabel")
 
         title_layout.addWidget(title_label)
@@ -181,7 +181,7 @@ class MainWindow(QMainWindow):
 
         self.scroll_area.setWidget(self.history_container)
         history_card_layout.addWidget(self.scroll_area, 1)
-        main_layout.addWidget(history_card, 1)
+        main_layout.addWidget(history_card, 5)
 
         # 输入卡片
         input_card = QFrame()
@@ -195,8 +195,8 @@ class MainWindow(QMainWindow):
 
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText("例如：帮我总结这个文件的要点，并给出下一步执行建议...")
-        self.text_input.setMinimumHeight(110)
-        self.text_input.setMaximumHeight(150)
+        self.text_input.setMinimumHeight(72)
+        self.text_input.setMaximumHeight(96)
 
         # 文件上传区
         file_widget = QWidget()
@@ -204,20 +204,22 @@ class MainWindow(QMainWindow):
         file_layout.setContentsMargins(0, 0, 0, 0)
         file_layout.setSpacing(10)
 
-        upload_button = QPushButton("上传文件/图片")
+        upload_button = QPushButton("📎")
         upload_button.setObjectName("AssistButton")
-        upload_button.setMinimumWidth(130)
+        upload_button.setFixedSize(40, 36)
+        upload_button.setToolTip("上传文件/图片")
         upload_button.clicked.connect(self.select_file)
 
-        self.voice_button = QPushButton("开始录音")
+        self.voice_button = QPushButton("🎤")
         self.voice_button.setObjectName("AssistButton")
-        self.voice_button.setMinimumWidth(110)
+        self.voice_button.setFixedSize(40, 36)
+        self.voice_button.setToolTip("开始录音")
         self.voice_button.clicked.connect(self.toggle_microphone_recording)
 
         self.file_path_label = QLabel("未选择文件")
         self.file_path_label.setStyleSheet(
             "font-size: 12px; color: #5f6b7a; background: #f7f9fc; border: 1px solid #e3e8f2;"
-            "border-radius: 10px; padding: 7px 10px;"
+            "border-radius: 10px; padding: 6px 8px;"
         )
 
         file_layout.addWidget(upload_button)
@@ -230,14 +232,16 @@ class MainWindow(QMainWindow):
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(10)
 
-        clear_button = QPushButton("清空")
+        clear_button = QPushButton("🗑")
         clear_button.setObjectName("DangerButton")
-        clear_button.setMinimumWidth(92)
+        clear_button.setFixedSize(40, 36)
+        clear_button.setToolTip("清空输入")
         clear_button.clicked.connect(self.clear_input)
 
-        send_button = QPushButton("发送")
+        send_button = QPushButton("➤")
         send_button.setObjectName("PrimaryButton")
-        send_button.setMinimumWidth(92)
+        send_button.setFixedSize(48, 36)
+        send_button.setToolTip("发送")
         send_button.clicked.connect(self.send_message)
 
         button_layout.addStretch()
@@ -254,7 +258,7 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(button_widget)
         input_layout.addWidget(self.status_label)
 
-        main_layout.addWidget(input_card)
+        main_layout.addWidget(input_card, 1)
 
         self.setup_microphone_recording()
 
@@ -355,12 +359,14 @@ class MainWindow(QMainWindow):
             self.media_recorder.record()
 
             self.is_recording = True
-            self.voice_button.setText("停止录音")
+            self.voice_button.setText("⏹")
+            self.voice_button.setToolTip("停止录音并识别")
             self.status_label.setText("正在录音... 再次点击可停止并发送")
         else:
             self.media_recorder.stop()
             self.is_recording = False
-            self.voice_button.setText("开始录音")
+            self.voice_button.setText("🎤")
+            self.voice_button.setToolTip("开始录音")
             self.status_label.setText("录音结束，正在识别语音...")
 
             if self.record_audio_path:
