@@ -8,7 +8,7 @@ import tempfile
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout,
     QTextEdit, QPushButton, QHBoxLayout, QScrollArea, QFileDialog,
-    QFrame
+    QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QIcon
@@ -264,9 +264,9 @@ class MainWindow(QMainWindow):
         has_file = bool(self.selected_file_path)
 
         if self.content:
-            self.add_to_history(f"用户: {self.content}", role="user")
+            self.add_to_history(self.content, role="user")
         if has_file:
-            self.add_to_history(f"用户上传文件: {os.path.basename(self.selected_file_path)}", role="user")
+            self.add_to_history(f"📎 上传文件：{os.path.basename(self.selected_file_path)}", role="user")
 
         if self.content or has_file:
 
@@ -296,7 +296,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("已完成")
         self.selected_file_path = ""
         self.file_path_label.setText("未选择文件")
-        self.add_to_history(f"AI: {result}", role="ai")
+        self.add_to_history(result, role="ai")
 
     def clear_input(self):
         """清空输入框"""
@@ -390,46 +390,72 @@ class MainWindow(QMainWindow):
 
         if transcribed_text.startswith("语音识别失败") or transcribed_text.startswith("语音文件不存在"):
             self.status_label.setText(transcribed_text)
-            self.add_to_history(f"AI: {transcribed_text}", role="ai")
+            self.add_to_history(transcribed_text, role="ai")
             return
 
         self.text_input.setPlainText(transcribed_text)
         self.status_label.setText("语音识别完成，正在发送请求...")
-        self.add_to_history(f"语音识别结果: {transcribed_text}", role="user")
+        self.add_to_history(f"🎤 {transcribed_text}", role="user")
         self.send_message()
 
     def add_to_history(self, message, role="user"):
-        """添加消息到历史区域"""
-        label = QLabel(message)
-        if role == "ai":
-            style = """
-                QLabel {
-                    background-color: #eef6ff;
-                    border: 1px solid #d7e7ff;
-                    border-radius: 12px;
-                    padding: 10px;
-                    margin: 2px;
-                    font-size: 14px;
-                    color: #244a7f;
-                }
-            """
-        else:
-            style = """
-                QLabel {
-                    background-color: #f8fbff;
-                    border: 1px solid #e1e9f7;
-                    border-radius: 12px;
-                    padding: 10px;
-                    margin: 2px;
-                    font-size: 14px;
-                }
-            """
-        label.setStyleSheet(style)
-        label.setWordWrap(True)  # 自动换行
-        label.setMaximumWidth(max(self.scroll_area.width() - 30, 600))
+        """添加消息到历史区域，采用 GPT 风格左右分栏消息气泡。"""
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(2, 2, 2, 2)
+        row_layout.setSpacing(8)
 
-        # 添加到历史布局
-        self.history_layout.addWidget(label)
+        sender = QLabel("你" if role == "user" else "AI")
+        sender.setFixedWidth(28)
+        sender.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        bubble = QFrame()
+        bubble.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        bubble_layout = QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(12, 10, 12, 10)
+
+        content_label = QLabel(message)
+        content_label.setWordWrap(True)
+        content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        content_label.setMaximumWidth(640)
+        bubble_layout.addWidget(content_label)
+
+        if role == "user":
+            sender.setStyleSheet(
+                "font-size: 11px; font-weight: 700; color: #4c6fff;"
+                "background: #e8eeff; border: 1px solid #d2ddff; border-radius: 10px;"
+            )
+            bubble.setStyleSheet(
+                "QFrame {"
+                "background-color: #4f7df3;"
+                "border: 1px solid #4a74df;"
+                "border-radius: 14px;"
+                "}"
+            )
+            content_label.setStyleSheet("color: white; font-size: 14px; line-height: 1.5;")
+
+            row_layout.addStretch()
+            row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignRight)
+            row_layout.addWidget(sender)
+        else:
+            sender.setStyleSheet(
+                "font-size: 11px; font-weight: 700; color: #596579;"
+                "background: #f0f3f8; border: 1px solid #e0e6f0; border-radius: 10px;"
+            )
+            bubble.setStyleSheet(
+                "QFrame {"
+                "background-color: #ffffff;"
+                "border: 1px solid #d9e2f0;"
+                "border-radius: 14px;"
+                "}"
+            )
+            content_label.setStyleSheet("color: #263238; font-size: 14px; line-height: 1.5;")
+
+            row_layout.addWidget(sender)
+            row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignLeft)
+            row_layout.addStretch()
+
+        self.history_layout.addWidget(row_widget)
 
         # 确保最新消息可见
         self.ensure_scroll_to_bottom()
