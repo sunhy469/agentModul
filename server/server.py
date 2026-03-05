@@ -167,35 +167,45 @@ def _resolve_search_root(directory: str = "") -> Path:
     return Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).resolve()
 
 
+def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | None, str]:
+    """按关键字查找文件并返回最佳匹配。"""
+    search_root = _resolve_search_root(directory)
+    if not search_root.exists() or not search_root.is_dir():
+        return None, f"目录无效：{search_root}"
+
+    keyword = filename.strip().lower()
+    if not keyword:
+        return None, "请提供文件名或关键字。"
+
+    candidates = [
+        p for p in search_root.rglob("*")
+        if p.is_file() and keyword in p.name.lower()
+    ]
+
+    if not candidates:
+        return None, f"未找到包含关键字“{filename}”的文件。搜索目录：{search_root}"
+
+    exact = [p for p in candidates if p.name.lower() == keyword]
+    target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
+    return target, ""
+
+
 @mcp.tool()
-def find_and_read_local_file(filename: str, requirement: str = "") -> str:
+def find_and_read_local_file(filename: str, requirement: str = "", open_with_default: bool = True) -> str:
     """
-    根据文件名在本地目录中查找文件并读取内容。
+    根据文件名在本地目录中查找文件，读取内容并可按默认方式打开。
     :param filename: 待查找的文件名（支持完整文件名或关键字）
     :param requirement: 用户需求（可选），会附在返回文本中方便模型解析
+    :param open_with_default: 是否按系统默认方式打开文件（默认 True）
     :return: 文件定位与内容
     """
     try:
-        search_root = _resolve_search_root()
+        target, err = _find_file_by_keyword(filename)
+        if err:
+            return err
 
-        if not search_root.exists() or not search_root.is_dir():
-            return f"本地搜索目录无效：{search_root}"
-
-        keyword = filename.strip().lower()
-        if not keyword:
-            return "请提供要查找的文件名或关键字。"
-
-        candidates: list[Path] = []
-        for path in search_root.rglob("*"):
-            if path.is_file() and keyword in path.name.lower():
-                candidates.append(path)
-
-        if not candidates:
-            return f"未找到包含关键字“{filename}”的文件。搜索目录：{search_root}"
-
-        # 优先匹配完整文件名，其次取最短路径的候选
-        exact = [p for p in candidates if p.name.lower() == keyword]
-        target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
+        if open_with_default:
+            _open_with_default_app(target)
 
         file_content = _safe_read_file(target)
         requirement_text = requirement.strip()
@@ -206,6 +216,9 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
             f"文件大小：{target.stat().st_size} bytes\n"
         )
 
+        if open_with_default:
+            response += "文件已按系统默认方式打开。\n"
+
         if requirement_text:
             response += f"用户需求：{requirement_text}\n"
 
@@ -213,7 +226,7 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
         return response
 
     except Exception as e:
-        return f"查找或读取文件失败: {e}"
+        return f"查找、读取或打开文件失败: {e}"
 
 
 
@@ -405,29 +418,15 @@ def open_local_file_by_name(filename: str, directory: str = "") -> str:
     :param directory: 搜索目录（为空时用默认目录）
     """
     try:
-        keyword = filename.strip().lower()
-        if not keyword:
-            return "请提供文件名或关键字。"
-
-        search_root = _resolve_search_root(directory)
-        if not search_root.exists() or not search_root.is_dir():
-            return f"目录无效：{search_root}"
-
-        candidates = [
-            p for p in search_root.rglob("*")
-            if p.is_file() and keyword in p.name.lower()
-        ]
-
-        if not candidates:
-            return f"未找到包含关键字“{filename}”的文件。搜索目录：{search_root}"
-
-        exact = [p for p in candidates if p.name.lower() == keyword]
-        target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
+        target, err = _find_file_by_keyword(filename, directory)
+        if err:
+            return err
 
         _open_with_default_app(target)
         return f"已按系统默认方式打开文件：{target}"
     except Exception as e:
         return f"查找或打开文件失败: {e}"
+
 
 @mcp.tool()
 def open_path_in_file_manager(target_path: str = "") -> str:
