@@ -4,13 +4,15 @@ main_window.py - 主窗口类
 
 import asyncio
 import os
+import tempfile
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout,
     QTextEdit, QPushButton, QHBoxLayout, QScrollArea, QFileDialog,
     QFrame
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QIcon
+from PySide6.QtMultimedia import QAudioInput, QMediaCaptureSession, QMediaDevices, QMediaFormat, QMediaRecorder
 
 
 class MainWindow(QMainWindow):
@@ -26,6 +28,11 @@ class MainWindow(QMainWindow):
         self.loop = loop
         self.result_signal.connect(self.show_ai_result)
         self.voice_signal.connect(self.on_voice_transcribed)
+        self.is_recording = False
+        self.record_audio_path = ""
+        self.audio_input = None
+        self.capture_session = None
+        self.media_recorder = None
         self.setWindowIcon(QIcon("icon.png"))
         self.init_ui()
 
@@ -202,10 +209,10 @@ class MainWindow(QMainWindow):
         upload_button.setMinimumWidth(130)
         upload_button.clicked.connect(self.select_file)
 
-        voice_button = QPushButton("语音输入")
-        voice_button.setObjectName("AssistButton")
-        voice_button.setMinimumWidth(110)
-        voice_button.clicked.connect(self.select_audio_and_transcribe)
+        self.voice_button = QPushButton("开始录音")
+        self.voice_button.setObjectName("AssistButton")
+        self.voice_button.setMinimumWidth(110)
+        self.voice_button.clicked.connect(self.toggle_microphone_recording)
 
         self.file_path_label = QLabel("未选择文件")
         self.file_path_label.setStyleSheet(
@@ -214,7 +221,7 @@ class MainWindow(QMainWindow):
         )
 
         file_layout.addWidget(upload_button)
-        file_layout.addWidget(voice_button)
+        file_layout.addWidget(self.voice_button)
         file_layout.addWidget(self.file_path_label, 1)
 
         # 操作按钮
@@ -248,6 +255,8 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.status_label)
 
         main_layout.addWidget(input_card)
+
+        self.setup_microphone_recording()
 
     def send_message(self):
 
@@ -310,23 +319,61 @@ class MainWindow(QMainWindow):
             self.file_path_label.setText(os.path.basename(file_path))
             self.status_label.setText("文件已选择，点击发送进行解析")
 
-    def select_audio_and_transcribe(self):
-        """选择音频并进行语音识别，识别后自动发送给模型。"""
-        audio_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择语音文件",
-            "",
-            "音频文件 (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.webm);;所有文件 (*)"
-        )
+    def setup_microphone_recording(self):
+        """初始化麦克风录音组件。"""
+        try:
+            devices = QMediaDevices.audioInputs()
+            if not devices:
+                self.status_label.setText("未检测到麦克风设备，语音功能不可用")
+                self.voice_button.setEnabled(False)
+                return
 
-        if audio_path:
-            self.status_label.setText("正在识别语音，请稍候...")
-            self.add_to_history(f"用户上传语音: {os.path.basename(audio_path)}", role="user")
-            future = asyncio.run_coroutine_threadsafe(
-                self.mcpClient.transcribe_audio_file(audio_path),
-                self.loop
-            )
-            future.add_done_callback(self.handle_voice_result)
+            self.audio_input = QAudioInput(devices[0])
+            self.capture_session = QMediaCaptureSession()
+            self.capture_session.setAudioInput(self.audio_input)
+
+            self.media_recorder = QMediaRecorder()
+            self.capture_session.setRecorder(self.media_recorder)
+            self.media_recorder.recorderStateChanged.connect(self.on_recorder_state_changed)
+        except Exception as e:
+            self.status_label.setText(f"初始化麦克风失败: {e}")
+            self.voice_button.setEnabled(False)
+
+    def toggle_microphone_recording(self):
+        """开始或停止麦克风录音。"""
+        if not self.media_recorder:
+            self.status_label.setText("语音功能不可用，请检查麦克风或多媒体组件")
+            return
+
+        if not self.is_recording:
+            temp_dir = tempfile.gettempdir()
+            self.record_audio_path = os.path.join(temp_dir, "assistant_record.wav")
+
+            output_url = QUrl.fromLocalFile(self.record_audio_path)
+            self.media_recorder.setOutputLocation(output_url)
+            self.media_recorder.setMediaFormat(QMediaFormat(QMediaFormat.FileFormat.Wave))
+            self.media_recorder.record()
+
+            self.is_recording = True
+            self.voice_button.setText("停止录音")
+            self.status_label.setText("正在录音... 再次点击可停止并发送")
+        else:
+            self.media_recorder.stop()
+            self.is_recording = False
+            self.voice_button.setText("开始录音")
+            self.status_label.setText("录音结束，正在识别语音...")
+
+            if self.record_audio_path:
+                self.add_to_history("用户语音输入（麦克风）", role="user")
+                future = asyncio.run_coroutine_threadsafe(
+                    self.mcpClient.transcribe_audio_file(self.record_audio_path),
+                    self.loop
+                )
+                future.add_done_callback(self.handle_voice_result)
+
+    def on_recorder_state_changed(self, _state):
+        """录音状态回调（预留扩展）。"""
+        return
 
     def handle_voice_result(self, future):
         try:
@@ -398,6 +445,15 @@ class MainWindow(QMainWindow):
         scrollbar = self.scroll_area.verticalScrollBar()
         if scrollbar:
             scrollbar.setValue(scrollbar.maximum())
+
+    def closeEvent(self, event):
+        """窗口关闭时停止录音，释放资源。"""
+        try:
+            if self.media_recorder and self.is_recording:
+                self.media_recorder.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def clear_history(self):
         """清空历史记录"""
