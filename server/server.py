@@ -193,7 +193,7 @@ def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | No
 @mcp.tool()
 def find_and_read_local_file(filename: str, requirement: str = "", open_with_default: bool = True) -> str:
     """
-    根据文件名在本地目录中查找文件，读取内容并可按默认方式打开。
+    根据文件名在本地目录中查找文件，并执行“读取内容 + 默认应用打开”。
     :param filename: 待查找的文件名（支持完整文件名或关键字）
     :param requirement: 用户需求（可选），会附在返回文本中方便模型解析
     :param open_with_default: 是否按系统默认方式打开文件（默认 True）
@@ -408,24 +408,6 @@ def read_file(file_path: str, open_with_default: bool = True) -> str:
         return f"文件路径：{target}\n文件内容：\n{content}"
     except Exception as e:
         return f"读取或打开文件失败: {e}"
-
-
-@mcp.tool()
-def open_local_file_by_name(filename: str, directory: str = "") -> str:
-    """
-    在本地目录按文件名关键字查找并按系统默认方式打开第一个匹配文件。
-    :param filename: 文件名或关键字
-    :param directory: 搜索目录（为空时用默认目录）
-    """
-    try:
-        target, err = _find_file_by_keyword(filename, directory)
-        if err:
-            return err
-
-        _open_with_default_app(target)
-        return f"已按系统默认方式打开文件：{target}"
-    except Exception as e:
-        return f"查找或打开文件失败: {e}"
 
 
 @mcp.tool()
