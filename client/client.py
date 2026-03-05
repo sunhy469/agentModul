@@ -2,6 +2,8 @@ import asyncio
 import os
 import json
 import sys
+import base64
+import mimetypes
 import httpx
 from typing import Optional
 from contextlib import AsyncExitStack
@@ -74,9 +76,50 @@ class MCPClient:
         print("\n 已连接到服务器，支持以下工具:", [tool.name for tool in tools])
         return tools
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str, file_path: str = "") -> str:
         """使用大模型处理查询并调用可用的 MCP 工具"""
-        messages = [{"role": "user", "content": query}]
+        user_content = []
+
+        if query:
+            user_content.append({"type": "text", "text": query})
+
+        if file_path:
+            if not os.path.exists(file_path):
+                return "上传的文件不存在，请重新选择后再试。"
+
+            mime_type, _ = mimetypes.guess_type(file_path)
+            mime_type = mime_type or "application/octet-stream"
+
+            if mime_type.startswith("image/"):
+                with open(file_path, "rb") as f:
+                    image_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+                user_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{image_base64}"
+                        }
+                    }
+                )
+            else:
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        file_text = f.read()
+                except UnicodeDecodeError:
+                    return "当前仅支持图片或 UTF-8 编码的文本文件解析。"
+
+                user_content.append(
+                    {
+                        "type": "text",
+                        "text": f"以下是用户上传文件（{os.path.basename(file_path)}）的内容，请进行解析并总结：\n{file_text}"
+                    }
+                )
+
+        if not user_content:
+            return "请输入问题或上传文件后再发送。"
+
+        messages = [{"role": "user", "content": user_content}]
 
         try:
             response = await self.session.list_tools()

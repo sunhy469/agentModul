@@ -3,9 +3,10 @@ main_window.py - 主窗口类
 """
 
 import asyncio
+import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout,
-    QTextEdit, QPushButton, QHBoxLayout, QScrollArea
+    QTextEdit, QPushButton, QHBoxLayout, QScrollArea, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon
@@ -18,6 +19,7 @@ class MainWindow(QMainWindow):
     def __init__(self, mcpClient, loop):
         super().__init__()
         self.content = ""  # 存储用户输入的文本
+        self.selected_file_path = ""
         self.mcpClient = mcpClient
         self.loop = loop
         self.result_signal.connect(self.show_ai_result)
@@ -144,7 +146,42 @@ class MainWindow(QMainWindow):
         # 将组件添加到输入布局
         input_layout.addWidget(input_label)
         input_layout.addWidget(self.text_input)
+
+        # 文件上传区
+        file_widget = QWidget()
+        file_layout = QHBoxLayout(file_widget)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.file_path_label = QLabel("未选择文件")
+        self.file_path_label.setStyleSheet("color: #666; font-size: 12px;")
+
+        upload_button = QPushButton("上传文件/图片")
+        upload_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 12px;
+                font-size: 12px;
+                min-width: 110px;
+            }
+            QPushButton:hover {
+                background-color: #1e88e5;
+            }
+        """)
+        upload_button.clicked.connect(self.select_file)
+
+        file_layout.addWidget(upload_button)
+        file_layout.addWidget(self.file_path_label, 1)
+
+        # 状态信息
+        self.status_label = QLabel("就绪")
+        self.status_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
+
+        input_layout.addWidget(file_widget)
         input_layout.addWidget(button_widget)
+        input_layout.addWidget(self.status_label)
 
         # 将输入区域添加到主布局
         main_layout.addWidget(input_widget)
@@ -153,14 +190,20 @@ class MainWindow(QMainWindow):
     def send_message(self):
 
         self.content = self.text_input.toPlainText().strip()
-        self.add_to_history(f"用户: {self.content}")
+        has_file = bool(self.selected_file_path)
 
         if self.content:
+            self.add_to_history(f"用户: {self.content}")
+        if has_file:
+            self.add_to_history(f"用户上传文件: {os.path.basename(self.selected_file_path)}")
+
+        if self.content or has_file:
 
             self.text_input.clear()
+            self.status_label.setText("正在发送请求，请稍候...")
 
             future = asyncio.run_coroutine_threadsafe(
-                self.mcpClient.process_query(self.content),
+                self.mcpClient.process_query(self.content, self.selected_file_path),
                 self.loop
             )
 
@@ -179,13 +222,32 @@ class MainWindow(QMainWindow):
         self.result_signal.emit(result)
 
     def show_ai_result(self, result):
+        self.status_label.setText("已完成")
+        self.selected_file_path = ""
+        self.file_path_label.setText("未选择文件")
         self.add_to_history(f"AI: {result}")
 
 
     def clear_input(self):
         """清空输入框"""
         self.text_input.clear()
+        self.selected_file_path = ""
+        self.file_path_label.setText("未选择文件")
         self.status_label.setText("输入框已清空")
+
+    def select_file(self):
+        """选择要上传并解析的文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择文件或图片",
+            "",
+            "支持文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.pdf *.txt *.md *.docx);;所有文件 (*)"
+        )
+
+        if file_path:
+            self.selected_file_path = file_path
+            self.file_path_label.setText(os.path.basename(file_path))
+            self.status_label.setText("文件已选择，点击发送进行解析")
 
     def add_to_history(self, message):
         """添加消息到历史区域"""
