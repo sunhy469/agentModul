@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import whisper
+from zhconv import convert
 
 # 加载 .env 文件，确保 API Key 受到保护
 load_dotenv()
@@ -98,10 +99,18 @@ class MCPClient:
         print(audio_path)
 
         try:
-            print(666)
-            result = model.transcribe(audio_path)
+            os.environ["FFMPEG_BINARY"] = r"D:\ffmpeg\bin\ffmpeg.exe"
+
+            result = model.transcribe(
+                audio_path,
+                language='zh',  # 指定中文
+                task='transcribe',  # 指定转写任务
+                fp16=False
+            )
             print(result["text"])
-            print(777)
+            text = result["text"]
+
+            text = convert(text, 'zh-cn')
 
             if not text:
                 return "未识别到语音内容，请重试。"
