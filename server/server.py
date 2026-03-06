@@ -167,35 +167,47 @@ def _resolve_search_root(directory: str = "") -> Path:
     return Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).resolve()
 
 
+def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | None, str]:
+    """按关键字查找文件并返回最佳匹配。"""
+    search_root = _resolve_search_root(directory)
+    if not search_root.exists() or not search_root.is_dir():
+        return None, f"目录无效：{search_root}"
+
+    keyword = filename.strip().lower()
+    if not keyword:
+        return None, "请提供文件名或关键字。"
+
+    candidates = [
+        p for p in search_root.rglob("*")
+        if p.is_file() and keyword in p.name.lower()
+    ]
+
+    if not candidates:
+        return None, f"未找到包含关键字“{filename}”的文件。搜索目录：{search_root}"
+
+    exact = [p for p in candidates if p.name.lower() == keyword]
+    target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
+    return target, ""
+
+
+
+
 @mcp.tool()
-def find_and_read_local_file(filename: str, requirement: str = "") -> str:
+def find_and_read_local_file(filename: str, requirement: str = "", open_with_default: bool = True) -> str:
     """
-    根据文件名在本地目录中查找文件并读取内容。
+    根据文件名在本地目录中查找文件，并执行“读取内容 + 默认应用打开”。
     :param filename: 待查找的文件名（支持完整文件名或关键字）
     :param requirement: 用户需求（可选），会附在返回文本中方便模型解析
+    :param open_with_default: 是否按系统默认方式打开文件（默认 True）
     :return: 文件定位与内容
     """
     try:
-        search_root = _resolve_search_root()
+        target, err = _find_file_by_keyword(filename)
+        if err:
+            return err
 
-        if not search_root.exists() or not search_root.is_dir():
-            return f"本地搜索目录无效：{search_root}"
-
-        keyword = filename.strip().lower()
-        if not keyword:
-            return "请提供要查找的文件名或关键字。"
-
-        candidates: list[Path] = []
-        for path in search_root.rglob("*"):
-            if path.is_file() and keyword in path.name.lower():
-                candidates.append(path)
-
-        if not candidates:
-            return f"未找到包含关键字“{filename}”的文件。搜索目录：{search_root}"
-
-        # 优先匹配完整文件名，其次取最短路径的候选
-        exact = [p for p in candidates if p.name.lower() == keyword]
-        target = sorted(exact or candidates, key=lambda x: (len(str(x)), str(x)))[0]
+        if open_with_default:
+            _open_with_default_app(target)
 
         file_content = _safe_read_file(target)
         requirement_text = requirement.strip()
@@ -206,6 +218,9 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
             f"文件大小：{target.stat().st_size} bytes\n"
         )
 
+        if open_with_default:
+            response += "文件已按系统默认方式打开。\n"
+
         if requirement_text:
             response += f"用户需求：{requirement_text}\n"
 
@@ -213,7 +228,7 @@ def find_and_read_local_file(filename: str, requirement: str = "") -> str:
         return response
 
     except Exception as e:
-        return f"查找或读取文件失败: {e}"
+        return f"查找、读取或打开文件失败: {e}"
 
 
 
@@ -358,6 +373,45 @@ def search_web(query: str, engine: str = "bing") -> str:
     return f"尝试打开浏览器失败，请手动访问：{url}"
 
 
+
+
+def _open_with_default_app(target: Path) -> None:
+    """按系统默认方式打开文件。"""
+    system_name = platform.system().lower()
+    if system_name == "windows":
+        os.startfile(str(target))
+    elif system_name == "darwin":
+        subprocess.Popen(["open", str(target)])
+    else:
+        subprocess.Popen(["xdg-open", str(target)])
+
+
+@mcp.tool()
+def read_file(file_path: str, open_with_default: bool = True) -> str:
+    """
+    读取并（可选）按系统默认方式打开文件。
+    :param file_path: 文件完整路径
+    :param open_with_default: 是否按默认应用打开（默认 True）
+    """
+    try:
+        if not file_path.strip():
+            return "请提供文件路径。"
+
+        target = Path(file_path).expanduser().resolve()
+        if not target.exists() or not target.is_file():
+            return f"文件不存在：{target}"
+
+        if open_with_default:
+            _open_with_default_app(target)
+            return f"已按系统默认方式打开文件：{target}"
+
+        # 兼容部分请求：如果不打开则返回内容摘要
+        content = _safe_read_file(target)
+        return f"文件路径：{target}\n文件内容：\n{content}"
+    except Exception as e:
+        return f"读取或打开文件失败: {e}"
+
+
 @mcp.tool()
 def open_path_in_file_manager(target_path: str = "") -> str:
     """
@@ -419,6 +473,90 @@ def list_local_files(directory: str = "", keyword: str = "", limit: int = 20) ->
     except Exception as e:
         return f"列出文件失败: {e}"
 
+
+
+
+@mcp.tool()
+def execute_complex_instruction(
+        instruction: str = "",
+        file_keyword: str = "",
+        directory: str = "",
+        open_file: bool = True,
+        read_content: bool = True,
+        requirement: str = "",
+        app_command: str = "",
+        app_arguments: str = "",
+        web_query: str = "",
+        web_engine: str = "bing",
+        export_word_name: str = "",
+        export_word_content: str = "",
+) -> str:
+    """
+    执行复杂指令（结构化编排版）。
+
+    设计目标：由大模型先完成语义理解，将意图映射为参数；本工具只做稳定、可控的步骤执行，
+    避免在服务端做关键词匹配导致“看起来不智能”。
+
+    参数说明：
+    - instruction: 原始用户指令（用于记录）
+    - file_keyword: 需要查找的文件关键字（为空则跳过文件步骤）
+    - directory: 可选搜索目录
+    - open_file/read_content/requirement: 文件处理行为控制
+    - app_command/app_arguments: 应用启动步骤
+    - web_query/web_engine: 浏览器搜索步骤（仅当明确传入 web_query 时执行）
+    - export_word_name/export_word_content: 文档导出步骤
+    """
+    try:
+        steps: list[str] = []
+        if instruction.strip():
+            steps.append(f"复杂指令：{instruction.strip()}")
+
+        content_cache = ""
+
+        # 1) 文件查找/读取/打开
+        if file_keyword.strip():
+            target, err = _find_file_by_keyword(file_keyword, directory)
+            if err:
+                steps.append(f"[文件步骤失败] {err}")
+            else:
+                steps.append(f"[文件步骤] 已定位文件：{target}")
+
+                if open_file:
+                    _open_with_default_app(target)
+                    steps.append(f"[文件步骤] 已按默认应用打开：{target}")
+
+                if read_content:
+                    content_cache = _safe_read_file(target)
+                    steps.append(f"[文件步骤] 已读取内容（长度 {len(content_cache)}）")
+
+                if requirement.strip():
+                    steps.append(f"[文件步骤] 解析需求：{requirement.strip()}")
+
+        # 2) 打开应用
+        if app_command.strip():
+            app_result = open_local_application(app_command, app_arguments)
+            steps.append(f"[应用步骤] {app_result}")
+
+        # 3) 浏览器搜索（由模型明确传入 web_query 才执行）
+        if web_query.strip():
+            web_result = search_web(web_query, web_engine)
+            steps.append(f"[搜索步骤] {web_result}")
+
+        # 4) 导出 Word
+        final_export_name = export_word_name.strip()
+        final_export_content = export_word_content.strip()
+        if final_export_name:
+            if not final_export_content:
+                final_export_content = content_cache[:3000] if content_cache else "（未提供导出内容）"
+            export_result = create_word_file(final_export_name, final_export_content)
+            steps.append(f"[导出步骤] {export_result}")
+
+        if len(steps) == 0:
+            return "未接收到可执行的复杂步骤参数，请由模型先解析意图后传入结构化参数。"
+
+        return "\n".join(steps)
+    except Exception as e:
+        return f"复杂指令执行失败: {e}"
 
 @mcp.tool()
 async def query_weather(city: str) -> str:

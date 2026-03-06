@@ -83,7 +83,7 @@ class MCPClient:
         """仅当用户明确要求在浏览器中搜索时，才允许调用 search_web 工具。"""
         q = (query or "").lower()
         triggers = [
-            "在浏览器", "浏览器中", "打开浏览器", "用浏览器", "browser",
+            "在浏览器", "浏览器中", "打开浏览器", "用浏览器", "browser","在浏览器中",
             "search_web", "网页搜索", "上网搜", "去搜索引擎"
         ]
         actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]

@@ -8,7 +8,7 @@ import tempfile
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout,
     QTextEdit, QPushButton, QHBoxLayout, QScrollArea, QFileDialog,
-    QFrame
+    QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QIcon
@@ -79,8 +79,8 @@ class MainWindow(QMainWindow):
             }
             QPushButton {
                 border: none;
-                border-radius: 12px;
-                padding: 9px 18px;
+                border-radius: 14px;
+                padding: 8px 12px;
                 font-size: 13px;
                 font-weight: 600;
             }
@@ -150,11 +150,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel("🤖 多模态智能助手")
         title_label.setObjectName("TitleLabel")
 
-        subtitle_label = QLabel("支持文本提问、文件上传与智能解析，让交互更自然。")
-        subtitle_label.setObjectName("SubTitleLabel")
-
         title_layout.addWidget(title_label)
-        title_layout.addWidget(subtitle_label)
         main_layout.addWidget(title_card)
 
         # 聊天记录卡片
@@ -181,7 +177,7 @@ class MainWindow(QMainWindow):
 
         self.scroll_area.setWidget(self.history_container)
         history_card_layout.addWidget(self.scroll_area, 1)
-        main_layout.addWidget(history_card, 1)
+        main_layout.addWidget(history_card, 5)
 
         # 输入卡片
         input_card = QFrame()
@@ -195,8 +191,8 @@ class MainWindow(QMainWindow):
 
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText("例如：帮我总结这个文件的要点，并给出下一步执行建议...")
-        self.text_input.setMinimumHeight(110)
-        self.text_input.setMaximumHeight(150)
+        self.text_input.setMinimumHeight(72)
+        self.text_input.setMaximumHeight(96)
 
         # 文件上传区
         file_widget = QWidget()
@@ -204,57 +200,59 @@ class MainWindow(QMainWindow):
         file_layout.setContentsMargins(0, 0, 0, 0)
         file_layout.setSpacing(10)
 
-        upload_button = QPushButton("上传文件/图片")
+        upload_button = QPushButton("📎")
         upload_button.setObjectName("AssistButton")
-        upload_button.setMinimumWidth(130)
+        upload_button.setFixedSize(40, 36)
+        upload_button.setToolTip("上传文件/图片")
         upload_button.clicked.connect(self.select_file)
 
-        self.voice_button = QPushButton("开始录音")
+        self.voice_button = QPushButton("🎤")
         self.voice_button.setObjectName("AssistButton")
-        self.voice_button.setMinimumWidth(110)
+        self.voice_button.setFixedSize(40, 36)
+        self.voice_button.setToolTip("开始录音")
         self.voice_button.clicked.connect(self.toggle_microphone_recording)
 
         self.file_path_label = QLabel("未选择文件")
         self.file_path_label.setStyleSheet(
             "font-size: 12px; color: #5f6b7a; background: #f7f9fc; border: 1px solid #e3e8f2;"
-            "border-radius: 10px; padding: 7px 10px;"
+            "border-radius: 10px; padding: 6px 8px;"
         )
 
         file_layout.addWidget(upload_button)
         file_layout.addWidget(self.voice_button)
         file_layout.addWidget(self.file_path_label, 1)
 
-        # 操作按钮
         button_widget = QWidget()
         button_layout = QHBoxLayout(button_widget)
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(10)
 
-        clear_button = QPushButton("清空")
-        clear_button.setObjectName("DangerButton")
-        clear_button.setMinimumWidth(92)
-        clear_button.clicked.connect(self.clear_input)
-
-        send_button = QPushButton("发送")
-        send_button.setObjectName("PrimaryButton")
-        send_button.setMinimumWidth(92)
-        send_button.clicked.connect(self.send_message)
-
-        button_layout.addStretch()
-        button_layout.addWidget(clear_button)
-        button_layout.addWidget(send_button)
-
-        # 状态信息
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("StatusLabel")
+        button_layout.addWidget(self.status_label)  # 先添加状态标签
+
+        button_layout.addStretch()
+
+        clear_button = QPushButton("🗑")
+        clear_button.setObjectName("DangerButton")
+        clear_button.setFixedSize(40, 36)
+        clear_button.setToolTip("清空输入")
+        clear_button.clicked.connect(self.clear_input)
+        button_layout.addWidget(clear_button)
+
+        send_button = QPushButton("➤")
+        send_button.setObjectName("PrimaryButton")
+        send_button.setFixedSize(48, 36)
+        send_button.setToolTip("发送")
+        send_button.clicked.connect(self.send_message)
+        button_layout.addWidget(send_button)
 
         input_layout.addWidget(input_label)
         input_layout.addWidget(self.text_input)
         input_layout.addWidget(file_widget)
         input_layout.addWidget(button_widget)
-        input_layout.addWidget(self.status_label)
 
-        main_layout.addWidget(input_card)
+        main_layout.addWidget(input_card, 1)
 
         self.setup_microphone_recording()
 
@@ -264,9 +262,9 @@ class MainWindow(QMainWindow):
         has_file = bool(self.selected_file_path)
 
         if self.content:
-            self.add_to_history(f"用户: {self.content}", role="user")
+            self.add_to_history(self.content, role="user")
         if has_file:
-            self.add_to_history(f"用户上传文件: {os.path.basename(self.selected_file_path)}", role="user")
+            self.add_to_history(f"📎 上传文件：{os.path.basename(self.selected_file_path)}", role="user")
 
         if self.content or has_file:
 
@@ -296,7 +294,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("已完成")
         self.selected_file_path = ""
         self.file_path_label.setText("未选择文件")
-        self.add_to_history(f"AI: {result}", role="ai")
+        self.add_to_history(result, role="ai")
 
     def clear_input(self):
         """清空输入框"""
@@ -346,7 +344,7 @@ class MainWindow(QMainWindow):
             return
 
         if not self.is_recording:
-            temp_dir =  r"D:\finalwork\PythonProject\wav_file"
+            temp_dir = tempfile.gettempdir()
             self.record_audio_path = os.path.join(temp_dir, "assistant_record.wav")
 
             output_url = QUrl.fromLocalFile(self.record_audio_path)
@@ -355,22 +353,22 @@ class MainWindow(QMainWindow):
             self.media_recorder.record()
 
             self.is_recording = True
-            self.voice_button.setText("停止录音")
+            self.voice_button.setText("⏹")
+            self.voice_button.setToolTip("停止录音并识别")
             self.status_label.setText("正在录音... 再次点击可停止并发送")
         else:
             self.media_recorder.stop()
             self.is_recording = False
-            self.voice_button.setText("开始录音")
+            self.voice_button.setText("🎤")
+            self.voice_button.setToolTip("开始录音")
             self.status_label.setText("录音结束，正在识别语音...")
 
             if self.record_audio_path:
-                self.add_to_history("用户语音输入（麦克风）", role="user")
                 future = asyncio.run_coroutine_threadsafe(
                     self.mcpClient.transcribe_audio_file(self.record_audio_path),
                     self.loop
                 )
                 future.add_done_callback(self.handle_voice_result)
-
 
     def on_recorder_state_changed(self, _state):
         """录音状态回调（预留扩展）。"""
@@ -378,10 +376,7 @@ class MainWindow(QMainWindow):
 
     def handle_voice_result(self, future):
         try:
-            print(1)
-            print(future)
             text = future.result()
-            print(text)
         except Exception as e:
             text = f"语音识别失败: {e}"
 
@@ -394,46 +389,71 @@ class MainWindow(QMainWindow):
 
         if transcribed_text.startswith("语音识别失败") or transcribed_text.startswith("语音文件不存在"):
             self.status_label.setText(transcribed_text)
-            self.add_to_history(f"AI: {transcribed_text}", role="ai")
+            self.add_to_history(transcribed_text, role="ai")
             return
 
         self.text_input.setPlainText(transcribed_text)
         self.status_label.setText("语音识别完成，正在发送请求...")
-        self.add_to_history(f"语音识别结果: {transcribed_text}", role="user")
         self.send_message()
 
     def add_to_history(self, message, role="user"):
-        """添加消息到历史区域"""
-        label = QLabel(message)
-        if role == "ai":
-            style = """
-                QLabel {
-                    background-color: #eef6ff;
-                    border: 1px solid #d7e7ff;
-                    border-radius: 12px;
-                    padding: 10px;
-                    margin: 2px;
-                    font-size: 14px;
-                    color: #244a7f;
-                }
-            """
-        else:
-            style = """
-                QLabel {
-                    background-color: #f8fbff;
-                    border: 1px solid #e1e9f7;
-                    border-radius: 12px;
-                    padding: 10px;
-                    margin: 2px;
-                    font-size: 14px;
-                }
-            """
-        label.setStyleSheet(style)
-        label.setWordWrap(True)  # 自动换行
-        label.setMaximumWidth(max(self.scroll_area.width() - 30, 600))
+        """添加消息到历史区域，采用 GPT 风格左右分栏消息气泡。"""
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(2, 2, 2, 2)
+        row_layout.setSpacing(8)
 
-        # 添加到历史布局
-        self.history_layout.addWidget(label)
+        sender = QLabel("你" if role == "user" else "AI")
+        sender.setFixedWidth(28)
+        sender.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        bubble = QFrame()
+        bubble.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        bubble_layout = QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(12, 10, 12, 10)
+
+        content_label = QLabel(message)
+        content_label.setWordWrap(True)
+        content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        content_label.setMaximumWidth(640)
+        bubble_layout.addWidget(content_label)
+
+        if role == "user":
+            sender.setStyleSheet(
+                "font-size: 11px; font-weight: 700; color: #4c6fff;"
+                "background: #e8eeff; border: 1px solid #d2ddff; border-radius: 10px;"
+            )
+            bubble.setStyleSheet(
+                "QFrame {"
+                "background-color: #4f7df3;"
+                "border: 1px solid #4a74df;"
+                "border-radius: 14px;"
+                "}"
+            )
+            content_label.setStyleSheet("color: white; font-size: 14px; line-height: 1.5;")
+
+            row_layout.addStretch()
+            row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignRight)
+            row_layout.addWidget(sender)
+        else:
+            sender.setStyleSheet(
+                "font-size: 11px; font-weight: 700; color: #596579;"
+                "background: #f0f3f8; border: 1px solid #e0e6f0; border-radius: 10px;"
+            )
+            bubble.setStyleSheet(
+                "QFrame {"
+                "background-color: #ffffff;"
+                "border: 1px solid #d9e2f0;"
+                "border-radius: 14px;"
+                "}"
+            )
+            content_label.setStyleSheet("color: #263238; font-size: 14px; line-height: 1.5;")
+
+            row_layout.addWidget(sender)
+            row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignLeft)
+            row_layout.addStretch()
+
+        self.history_layout.addWidget(row_widget)
 
         # 确保最新消息可见
         self.ensure_scroll_to_bottom()
