@@ -89,7 +89,44 @@ class MCPClient:
         actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]
         return any(t in q for t in triggers) and any(a in q for a in actions)
 
+    def _should_allow_word_export(self, query: str, tool_args: dict) -> bool:
+        """让大模型基于语义判断是否应生成文档，避免硬编码关键词匹配。"""
+        export_name = str(tool_args.get("export_word_name", "")).strip()
+        export_content = str(tool_args.get("export_word_content", "")).strip()
+        if not export_name and not export_content:
+            return False
 
+        judge_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是工具调用安全裁决器。请基于用户原始意图做语义判断，"
+                    "只返回 JSON：{\"allow_export\": true/false, \"reason\": \"...\"}。"
+                    "当用户只是问答、讲解、总结，而没有要求保存/导出成文档时，必须返回 false。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"用户原始输入：{query}\n"
+                    f"当前复杂工具参数：{json.dumps(tool_args, ensure_ascii=False)}\n"
+                    "问题：是否应该执行 Word 文档导出？"
+                ),
+            },
+        ]
+
+        try:
+            judge_resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=judge_messages,
+                response_format={"type": "json_object"},
+            )
+            judge_text = (judge_resp.choices[0].message.content or "{}").strip()
+            judge_obj = json.loads(judge_text)
+            return bool(judge_obj.get("allow_export", False))
+        except Exception:
+            # 裁决异常时默认不导出，避免误生成文件
+            return False
     async def transcribe_audio_file(self, audio_path: str) -> str:
         """将音频文件转写为文本。"""
 
@@ -194,6 +231,10 @@ class MCPClient:
 
                 if tool_name == "search_web" and not self._is_browser_search_explicit(query):
                     return "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
+
+                if tool_name == "execute_complex_instruction" and not self._should_allow_word_export(query, tool_args):
+                    tool_args.pop("export_word_name", None)
+                    tool_args.pop("export_word_content", None)
 
                 # 执行工具
                 result = await self.session.call_tool(tool_name, tool_args)
