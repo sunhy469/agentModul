@@ -48,6 +48,33 @@ class MCPClient:
         self.sessions: dict[str, ClientSession] = {}
         self.tool_to_session: dict[str, ClientSession] = {}
 
+    async def _list_all_tools(self) -> list[Any]:
+        """聚合当前已连接 MCP 会话中的所有工具。"""
+        all_tools: list[Any] = []
+        for session in self.sessions.values():
+            response = await session.list_tools()
+            all_tools.extend(response.tools)
+        return all_tools
+
+    def _format_openai_tools(self, tools: list[Any], allow_browser_search: bool) -> list[dict[str, Any]]:
+        """将 MCP 工具定义转换为 OpenAI tools 参数。"""
+        openai_tools: list[dict[str, Any]] = []
+        for tool in tools:
+            if tool.name == "search_web" and not allow_browser_search:
+                continue
+
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema,
+                    },
+                }
+            )
+        return openai_tools
+
     async def _connect_stdio_server(self, name: str, command: str, args: list[str]) -> list[Any]:
         """连接一个 stdio MCP 服务并返回其工具列表。"""
         server_params = StdioServerParameters(command=command, args=args, env=None)
@@ -215,28 +242,9 @@ class MCPClient:
         try:
             allow_browser_search = self._is_browser_search_explicit(query)
             require_browser_tools = self._is_browser_task(query)
-            explicit_urls = self._extract_urls(query)
-            has_explicit_url = len(explicit_urls) > 0
-            available_tools = []
-            all_tools = []
-            for server_name, server_session in self.sessions.items():
-                response = await server_session.list_tools()
-                all_tools.extend(response.tools)
-
-            for tool in all_tools:
-                if tool.name == "search_web" and not allow_browser_search:
-                    continue
-
-                available_tools.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.inputSchema
-                        }
-                    }
-                )
+            has_explicit_url = len(self._extract_urls(query)) > 0
+            all_tools = await self._list_all_tools()
+            available_tools = self._format_openai_tools(all_tools, allow_browser_search)
 
             if require_browser_tools:
                 browser_tool_count = sum(
@@ -263,7 +271,7 @@ class MCPClient:
                 })
 
             # 支持多轮工具调用（网页自动化通常需要多步）
-            for _ in range(8):
+            while True:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -311,7 +319,5 @@ class MCPClient:
                         "content": tool_text,
                         "tool_call_id": tool_call.id,
                     })
-
-            return "工具调用轮次过多，已停止。请缩小任务范围后重试。"
         except Exception as e:
             return f"处理查询时出错 {str(e)}"
