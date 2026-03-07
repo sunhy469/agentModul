@@ -263,7 +263,7 @@ class MCPClient:
                 })
 
             # 支持多轮工具调用（网页自动化通常需要多步）
-            for _ in range(8):
+            for _ in range(1000):
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
