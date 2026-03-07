@@ -1,8 +1,9 @@
 import os
 import json
 import mimetypes
+import shlex
 import httpx
-from typing import Optional
+from typing import Optional, Any
 from contextlib import AsyncExitStack
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -43,39 +44,59 @@ class MCPClient:
         )
 
         self.session: Optional[ClientSession] = None
+        self.sessions: dict[str, ClientSession] = {}
+        self.tool_to_session: dict[str, ClientSession] = {}
+
+    async def _connect_stdio_server(self, name: str, command: str, args: list[str]) -> list[Any]:
+        """连接一个 stdio MCP 服务并返回其工具列表。"""
+        server_params = StdioServerParameters(command=command, args=args, env=None)
+
+        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+        stdio, write = stdio_transport
+        session = await self.exit_stack.enter_async_context(ClientSession(stdio, write))
+        await session.initialize()
+
+        self.sessions[name] = session
+        response = await session.list_tools()
+        return response.tools
 
     async def connect_to_server(self, server_script_path: str):
-        """连接到 MCP 服务器并列出可用工具"""
+        """连接本地 MCP 服务器，并可选接入 Browser MCP（Node 服务）。"""
         is_python = server_script_path.endswith('.py')
         is_js = server_script_path.endswith('.js')
 
         if not (is_python or is_js):
             raise ValueError("服务器脚本必须是 .py 或 .js 文件")
 
-        command = "python" if is_python else "node"
-        server_params = StdioServerParameters(
-            command=command,
-            args=[server_script_path],
-            env=None
-        )
+        local_command = "python" if is_python else "node"
+        local_tools = await self._connect_stdio_server("local", local_command, [server_script_path])
 
-        # 启动 MCP 服务器并建立通信
-        stdio_transport = await self.exit_stack.enter_async_context(
-            stdio_client(server_params)
-        )
+        # 保持兼容：默认 session 仍指向本地服务
+        self.session = self.sessions["local"]
 
-        self.stdio, self.write = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(
-            ClientSession(self.stdio, self.write)
-        )
+        all_tools = []
+        for tool in local_tools:
+            self.tool_to_session[tool.name] = self.sessions["local"]
+            all_tools.append(tool)
 
-        await self.session.initialize()
+        # 可选：接入 Browser MCP（Node 版）。默认关闭，不影响原有功能
+        browser_enabled = os.getenv("ENABLE_BROWSER_MCP", "0").strip().lower() in {"1", "true", "yes"}
+        if browser_enabled:
+            browser_cmd = os.getenv("BROWSER_MCP_COMMAND", "npx")
+            raw_args = os.getenv("BROWSER_MCP_ARGS", "@agentdeskai/browser-tools-mcp@latest")
+            browser_args = shlex.split(raw_args)
 
-        # 列出 MCP 服务器上的工具
-        response = await self.session.list_tools()
-        tools = response.tools
-        print("\n 已连接到服务器，支持以下工具:", [tool.name for tool in tools])
-        return tools
+            try:
+                browser_tools = await self._connect_stdio_server("browser", browser_cmd, browser_args)
+                for tool in browser_tools:
+                    self.tool_to_session[tool.name] = self.sessions["browser"]
+                    all_tools.append(tool)
+                print("\n 已接入 Browser MCP，新增工具:", [tool.name for tool in browser_tools])
+            except Exception as e:
+                print(f"\n ⚠️ Browser MCP 启动失败，已降级为仅本地工具: {e}")
+
+        print("\n 已连接到服务器，支持以下工具:", [tool.name for tool in all_tools])
+        return all_tools
 
 
 
@@ -88,6 +109,14 @@ class MCPClient:
         ]
         actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]
         return any(t in q for t in triggers) and any(a in q for a in actions)
+
+    def _is_browser_task(self, query: str) -> bool:
+        """判断用户是否在请求网页自动化（翻译网页/总结网页等）。"""
+        q = (query or "").lower()
+        browser_terms = ["网页", "网站", "browser", "chrome", "页面", "url", "链接", "devtools"]
+        task_terms = ["翻译", "总结", "提取", "分析", "抓取", "读取", "自动", "操作", "automation"]
+        return any(t in q for t in browser_terms) and any(t in q for t in task_terms)
+
 
 
     async def transcribe_audio_file(self, audio_path: str) -> str:
@@ -160,10 +189,15 @@ class MCPClient:
         messages = [{"role": "user", "content": "\n\n".join(user_prompt_parts)}]
 
         try:
-            response = await self.session.list_tools()
             allow_browser_search = self._is_browser_search_explicit(query)
+            require_browser_tools = self._is_browser_task(query)
             available_tools = []
-            for tool in response.tools:
+            all_tools = []
+            for server_name, server_session in self.sessions.items():
+                response = await server_session.list_tools()
+                all_tools.extend(response.tools)
+
+            for tool in all_tools:
                 if tool.name == "search_web" and not allow_browser_search:
                     continue
 
@@ -178,43 +212,67 @@ class MCPClient:
                     }
                 )
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=available_tools
-            )
+            if require_browser_tools:
+                browser_tool_count = sum(
+                    1 for t in available_tools if "browser" in t["function"]["name"].lower()
+                )
+                if browser_tool_count == 0:
+                    return (
+                        "你当前问题需要浏览器自动化工具，但本次会话未检测到 Browser MCP 工具。\n"
+                        "请确认：\n"
+                        "1) .env 已设置 ENABLE_BROWSER_MCP=1\n"
+                        "2) BROWSER_MCP_COMMAND=npx\n"
+                        "3) BROWSER_MCP_ARGS=@agentdeskai/browser-tools-mcp@latest\n"
+                        "4) 新终端已运行 npx @agentdeskai/browser-tools-server@latest\n"
+                        "5) Chrome 扩展 BrowserToolsMCP 已安装并连接成功"
+                    )
 
-            content = response.choices[0]
-
-            if content.finish_reason == "tool_calls":
-                # 如果需要使用工具，就解析工具
-                tool_call = content.message.tool_calls[0]
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-
-                if tool_name == "search_web" and not self._is_browser_search_explicit(query):
-                    return "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
-
-                # 执行工具
-                result = await self.session.call_tool(tool_name, tool_args)
-                print(f"\n {result}")
-
-                # 将工具调用结果存入messages
-                messages.append(content.message.model_dump())
-                messages.append({
-                    "role": "tool",
-                    "content": result.content[0].text,
-                    "tool_call_id": tool_call.id,
+                messages.insert(0, {
+                    "role": "system",
+                    "content": (
+                        "用户要求处理网页内容。请优先调用 browser 相关工具读取页面内容，"
+                        "再输出翻译/总结；不要只给操作建议。"
+                    )
                 })
 
-                # 再次调用模型生成最终回答
+            # 支持多轮工具调用（网页自动化通常需要多步）
+            for _ in range(8):
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
+                    tools=available_tools
                 )
 
-                return response.choices[0].message.content
+                content = response.choices[0]
+                if content.finish_reason != "tool_calls":
+                    return content.message.content
 
-            return content.message.content
+                tool_calls = content.message.tool_calls or []
+                messages.append(content.message.model_dump())
+
+                for tool_call in tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments or "{}")
+
+                    if tool_name == "search_web" and not self._is_browser_search_explicit(query):
+                        return "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
+
+                    call_session = self.tool_to_session.get(tool_name, self.session)
+                    result = await call_session.call_tool(tool_name, tool_args)
+                    print(f"\n {result}")
+
+                    tool_text = ""
+                    if getattr(result, "content", None):
+                        tool_text = "\n".join(
+                            getattr(item, "text", str(item)) for item in result.content
+                        )
+
+                    messages.append({
+                        "role": "tool",
+                        "content": tool_text,
+                        "tool_call_id": tool_call.id,
+                    })
+
+            return "工具调用轮次过多，已停止。请缩小任务范围后重试。"
         except Exception as e:
             return f"处理查询时出错 {str(e)}"
