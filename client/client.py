@@ -230,8 +230,9 @@ class MCPClient:
                 messages.insert(0, {
                     "role": "system",
                     "content": (
-                        "用户要求处理网页内容。请优先调用 browser 相关工具读取页面内容，"
-                        "再输出翻译/总结；不要只给操作建议。"
+                        "用户要求处理网页内容。你必须先调用 browser 相关工具去读取当前页面或访问目标页面，"
+                        "然后再输出翻译/总结。若用户未提供 URL，先尝试读取当前活动页面内容；"
+                        "只有在工具明确失败时，才向用户索取 URL。不要先回复操作建议。"
                     )
                 })
 
@@ -240,7 +241,8 @@ class MCPClient:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    tools=available_tools
+                    tools=available_tools,
+                    tool_choice="required" if require_browser_tools else "auto"
                 )
 
                 content = response.choices[0]
