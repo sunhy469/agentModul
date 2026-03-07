@@ -25,6 +25,67 @@ USER_AGENT = "weather-app/1.0"
 BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
 
+# 浏览器自动化会话（可选能力，不影响现有工具）
+_BROWSER_SESSION: dict[str, Any] = {
+    "playwright": None,
+    "browser": None,
+    "context": None,
+    "page": None,
+}
+
+
+def _load_playwright():
+    """按需加载 Playwright，避免未安装时影响其他工具。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        return None, (
+            "未检测到 Playwright 依赖，请先安装：\n"
+            "1) pip install playwright\n"
+            "2) python -m playwright install chromium\n"
+            f"详细错误：{e}"
+        )
+    return sync_playwright, ""
+
+
+def _get_active_page():
+    page = _BROWSER_SESSION.get("page")
+    if page is None:
+        return None, "浏览器会话未启动，请先调用 browser_start_session。"
+    return page, ""
+
+
+def _ensure_browser_closed() -> None:
+    """释放浏览器资源。"""
+    browser = _BROWSER_SESSION.get("browser")
+    playwright = _BROWSER_SESSION.get("playwright")
+    context = _BROWSER_SESSION.get("context")
+
+    try:
+        if context is not None:
+            context.close()
+    except Exception:
+        pass
+
+    try:
+        if browser is not None:
+            browser.close()
+    except Exception:
+        pass
+
+    try:
+        if playwright is not None:
+            playwright.stop()
+    except Exception:
+        pass
+
+    _BROWSER_SESSION.update({
+        "playwright": None,
+        "browser": None,
+        "context": None,
+        "page": None,
+    })
+
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
     """
@@ -371,6 +432,161 @@ def search_web(query: str, engine: str = "bing") -> str:
     if ok:
         return f"已在浏览器打开搜索：{url}"
     return f"尝试打开浏览器失败，请手动访问：{url}"
+
+
+@mcp.tool()
+def browser_start_session(headless: bool = False, viewport_width: int = 1366, viewport_height: int = 900) -> str:
+    """
+    启动浏览器自动化会话（Playwright + Chromium）。
+    在 server 进程内保持会话，供后续步骤复用。
+    """
+    sync_playwright, err = _load_playwright()
+    if err:
+        return err
+
+    try:
+        # 如果已有会话，先关闭再重建
+        _ensure_browser_closed()
+
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=headless)
+        context = browser.new_context(viewport={"width": viewport_width, "height": viewport_height})
+        page = context.new_page()
+
+        _BROWSER_SESSION.update({
+            "playwright": playwright,
+            "browser": browser,
+            "context": context,
+            "page": page,
+        })
+
+        return (
+            "浏览器自动化会话已启动。\n"
+            "建议顺序：browser_navigate -> browser_click/browser_type/browser_press -> "
+            "browser_get_text 或 browser_screenshot -> browser_close_session"
+        )
+    except Exception as e:
+        _ensure_browser_closed()
+        return f"启动浏览器自动化会话失败: {e}"
+
+
+@mcp.tool()
+def browser_navigate(url: str, wait_until: str = "domcontentloaded") -> str:
+    """导航到指定 URL。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        page.goto(url, wait_until=wait_until, timeout=30000)
+        title = page.title()
+        return f"已打开页面：{url}\n页面标题：{title}"
+    except Exception as e:
+        return f"页面导航失败: {e}"
+
+
+@mcp.tool()
+def browser_click(selector: str) -> str:
+    """点击页面元素（CSS 选择器）。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        page.click(selector, timeout=15000)
+        return f"已点击元素：{selector}"
+    except Exception as e:
+        return f"点击失败: {e}"
+
+
+@mcp.tool()
+def browser_type(selector: str, text: str, clear_first: bool = True) -> str:
+    """向输入框输入文本。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        if clear_first:
+            page.fill(selector, "", timeout=15000)
+        page.fill(selector, text, timeout=15000)
+        return f"已输入文本到元素：{selector}"
+    except Exception as e:
+        return f"输入失败: {e}"
+
+
+@mcp.tool()
+def browser_press(selector: str, key: str = "Enter") -> str:
+    """在指定元素上触发键盘按键。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        page.press(selector, key, timeout=15000)
+        return f"已在元素 {selector} 上按下按键：{key}"
+    except Exception as e:
+        return f"按键操作失败: {e}"
+
+
+@mcp.tool()
+def browser_get_text(selector: str, limit: int = 2000) -> str:
+    """读取指定元素文本。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        text = page.inner_text(selector, timeout=15000)
+        text = text.strip()
+        if not text:
+            return "元素文本为空。"
+        if len(text) > limit:
+            return text[:limit] + f"\n\n...（文本过长，已截断，原始长度 {len(text)}）"
+        return text
+    except Exception as e:
+        return f"读取文本失败: {e}"
+
+
+@mcp.tool()
+def browser_wait(milliseconds: int = 1000) -> str:
+    """等待一段时间，便于页面异步加载。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        ms = max(0, min(milliseconds, 60000))
+        page.wait_for_timeout(ms)
+        return f"已等待 {ms} ms"
+    except Exception as e:
+        return f"等待失败: {e}"
+
+
+@mcp.tool()
+def browser_screenshot(filename: str = "browser_capture.png", full_page: bool = True) -> str:
+    """保存页面截图到 generated_files。"""
+    page, err = _get_active_page()
+    if err:
+        return err
+
+    try:
+        safe_name = filename.replace("/", "").replace("\\", "")
+        target = Path(BASE_DIR) / safe_name
+        page.screenshot(path=str(target), full_page=full_page)
+        return f"截图已保存：{target}"
+    except Exception as e:
+        return f"截图失败: {e}"
+
+
+@mcp.tool()
+def browser_close_session() -> str:
+    """关闭浏览器自动化会话并释放资源。"""
+    if _BROWSER_SESSION.get("page") is None:
+        return "浏览器会话已关闭（当前无活动会话）。"
+
+    _ensure_browser_closed()
+    return "浏览器自动化会话已关闭。"
 
 
 
