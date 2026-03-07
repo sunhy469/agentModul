@@ -1,6 +1,7 @@
 import os
 import json
 import mimetypes
+import re
 import shlex
 import httpx
 from typing import Optional, Any
@@ -118,6 +119,29 @@ class MCPClient:
         return any(t in q for t in browser_terms) and any(t in q for t in task_terms)
 
 
+    def _extract_urls(self, text: str) -> list[str]:
+        if not text:
+            return []
+        pattern = r"https?://\S+"
+        return re.findall(pattern, text)
+
+    def _contains_navigation_intent(self, value):
+        """检测工具参数里是否包含 page.goto / browser_navigate 类跳转意图。"""
+        if isinstance(value, dict):
+            return any(self._contains_navigation_intent(v) for v in value.values())
+        if isinstance(value, list):
+            return any(self._contains_navigation_intent(v) for v in value)
+        if isinstance(value, str):
+            lowered = value.lower()
+            signals = [
+                "page.goto(",
+                "browser_navigate",
+                "goto('https://www.example.com'",
+                "https://www.example.com",
+            ]
+            return any(s in lowered for s in signals)
+        return False
+
 
     async def transcribe_audio_file(self, audio_path: str) -> str:
         """将音频文件转写为文本。"""
@@ -191,6 +215,8 @@ class MCPClient:
         try:
             allow_browser_search = self._is_browser_search_explicit(query)
             require_browser_tools = self._is_browser_task(query)
+            explicit_urls = self._extract_urls(query)
+            has_explicit_url = len(explicit_urls) > 0
             available_tools = []
             all_tools = []
             for server_name, server_session in self.sessions.items():
@@ -230,9 +256,9 @@ class MCPClient:
                 messages.insert(0, {
                     "role": "system",
                     "content": (
-                        "用户要求处理网页内容。你必须先调用 browser 相关工具去读取当前页面或访问目标页面，"
-                        "然后再输出翻译/总结。若用户未提供 URL，先尝试读取当前活动页面内容；"
-                        "只有在工具明确失败时，才向用户索取 URL。不要先回复操作建议。"
+                        "用户要求处理网页内容。你必须先调用 browser 相关工具读取内容，再输出翻译/总结。"
+                        "若用户未提供 URL，严禁跳转到任何示例站点（如 example.com），先读取当前活动页面；"
+                        "只有工具明确失败时，才向用户索取 URL。不要先回复操作建议。"
                     )
                 })
 
@@ -258,6 +284,17 @@ class MCPClient:
 
                     if tool_name == "search_web" and not self._is_browser_search_explicit(query):
                         return "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
+
+                    if require_browser_tools and not has_explicit_url and self._contains_navigation_intent(tool_args):
+                        messages.append({
+                            "role": "tool",
+                            "content": (
+                                "已阻止本次跳转：用户未提供 URL，禁止导航到示例页面。"
+                                "请改为读取当前 Chrome 活动页面内容后再翻译/总结。"
+                            ),
+                            "tool_call_id": tool_call.id,
+                        })
+                        continue
 
                     call_session = self.tool_to_session.get(tool_name, self.session)
                     result = await call_session.call_tool(tool_name, tool_args)
