@@ -112,15 +112,15 @@ def format_weather(data: dict[str, Any] | str) -> str:
 def create_word_file(filename: str, content: str) -> str:
     """
     根据文件名和内容创建 Word 文件。
-    :filename : 文件名
-    :content: 内容
+    :param filename : 文件名
+    :param content: 内容
     """
 
     try:
         # 防止路径攻击
         filename = filename.replace("/", "").replace("\\", "")
 
-        full_path = os.path.join(BASE_DIR, f"{filename}.docx")
+        full_path = os.path.join(BASE_DIR, f"{filename}")
 
         doc = Document()
         doc.add_heading(filename, level=1)
