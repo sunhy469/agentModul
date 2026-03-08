@@ -5,10 +5,8 @@ import shlex
 import shutil
 import subprocess
 import time
-import webbrowser
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
 
 import httpx
 from docx import Document
@@ -26,7 +24,6 @@ USER_AGENT = "weather-app/1.0"
 BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
 SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
-ALLOWED_WEB_ENGINES = {"bing", "google", "baidu"}
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -372,37 +369,6 @@ def open_local_application(app_command: str, arguments: str = "") -> str:
         return f"启动应用失败: {e}"
 
 
-@mcp.tool()
-def search_web(query: str, engine: str = "bing") -> str:
-    """
-    在默认浏览器中执行搜索。
-    :param query: 搜索关键词
-    :param engine: 搜索引擎（bing/google/baidu）
-    """
-    query = query.strip()
-    if not query:
-        return "请提供搜索关键词。"
-
-    engine_map = {
-        "bing": "https://www.bing.com/search?q={}",
-        "google": "https://www.google.com/search?q={}",
-        "baidu": "https://www.baidu.com/s?wd={}"
-    }
-    engine = engine.lower().strip()
-    if engine not in ALLOWED_WEB_ENGINES:
-        return f"搜索引擎不被允许：{engine}。允许值：{', '.join(sorted(ALLOWED_WEB_ENGINES))}"
-
-    template = engine_map[engine]
-    url = template.format(quote_plus(query))
-
-    ok = webbrowser.open(url)
-    if ok:
-        return f"已在浏览器打开搜索：{url}"
-    return f"尝试打开浏览器失败，请手动访问：{url}"
-
-
-
-
 def _open_with_default_app(target: Path) -> None:
     """按系统默认方式打开文件。"""
     system_name = platform.system().lower()
@@ -516,8 +482,6 @@ def execute_complex_instruction(
         requirement: str = "",
         app_command: str = "",
         app_arguments: str = "",
-        web_query: str = "",
-        web_engine: str = "bing",
         export_word_name: str = "",
         export_word_content: str = "",
 ) -> str:
@@ -533,7 +497,6 @@ def execute_complex_instruction(
     - directory: 可选搜索目录
     - open_file/read_content/requirement: 文件处理行为控制
     - app_command/app_arguments: 应用启动步骤
-    - web_query/web_engine: 浏览器搜索步骤（仅当明确传入 web_query 时执行）
     - export_word_name/export_word_content: 文档导出步骤
     """
     try:
@@ -573,14 +536,7 @@ def execute_complex_instruction(
             steps.append(f"[应用步骤] {app_result}")
             timings.append(f"[耗时] 应用阶段: {(time.perf_counter() - t1) * 1000:.2f} ms")
 
-        # 3) 浏览器搜索（由模型明确传入 web_query 才执行）
-        if web_query.strip():
-            t2 = time.perf_counter()
-            web_result = search_web(web_query, web_engine)
-            steps.append(f"[搜索步骤] {web_result}")
-            timings.append(f"[耗时] 搜索阶段: {(time.perf_counter() - t2) * 1000:.2f} ms")
-
-        # 4) 导出 Word
+        # 3) 导出 Word
         final_export_name = export_word_name.strip()
         final_export_content = export_word_content.strip()
         if final_export_name:

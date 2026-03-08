@@ -29,7 +29,6 @@ class PlanDecision:
     confidence: float
     required_tools: set[str]
     require_browser_tools: bool
-    allow_browser_search: bool
 
 
 class QueryPlanner:
@@ -38,12 +37,13 @@ class QueryPlanner:
     _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "qa": ("解释", "问", "为什么", "怎么", "总结", "建议"),
         "file": ("文件", "文档", "读取", "打开", "word", "docx", "pdf"),
-        "browser": ("网页", "网站", "url", "浏览器", "chrome", "抓取", "提取"),
+        "browser": ("网页", "网站", "url", "浏览器", "chrome", "页面", "链接"),
         "app": ("打开", "启动", "运行", "应用", "软件", "qq", "wechat"),
         "complex": ("并且", "然后", "接着", "同时", "步骤", "复杂", "先", "后"),
     }
 
-    _BROWSER_ACTIONS = ("搜索", "查", "search", "query", "翻译", "提取", "抓取", "读取")
+    _BROWSER_ACTIONS = ("翻译", "提取", "抓取", "读取", "分析", "自动", "填写", "点击", "总结")
+    _BROWSER_CONTEXT = ("当前页面", "当前网页", "这个页面", "这个网页", "网页里", "页面里", "url", "链接")
 
     def decide(self, query: str) -> PlanDecision:
         q = (query or "").lower()
@@ -54,25 +54,23 @@ class QueryPlanner:
                 if word in q:
                     scores[intent] += 1
 
-        # 多意图组合提升 complex 分值，体现步骤规划必要性
         active_intents = sum(1 for k in ("file", "browser", "app") if scores[k] > 0)
         if active_intents >= 2:
             scores["complex"] += active_intents
 
+        require_browser_tools = self._is_browser_automation_task(q)
+        if require_browser_tools:
+            scores["browser"] += 2
+
         best_intent = max(scores, key=scores.get)
         total = sum(scores.values()) or 1
         confidence = round(scores[best_intent] / total, 3)
-
-        allow_browser_search = self._is_browser_search_explicit(q)
-        require_browser_tools = scores["browser"] > 0 and any(a in q for a in self._BROWSER_ACTIONS)
 
         required_tools: set[str] = set()
         if scores["file"]:
             required_tools.update({"find_and_read_local_file", "read_file", "list_local_files"})
         if scores["app"]:
             required_tools.add("open_local_application")
-        if scores["browser"] and allow_browser_search:
-            required_tools.add("search_web")
         if scores["complex"]:
             required_tools.add("execute_complex_instruction")
 
@@ -81,24 +79,13 @@ class QueryPlanner:
             confidence=confidence,
             required_tools=required_tools,
             require_browser_tools=require_browser_tools,
-            allow_browser_search=allow_browser_search,
         )
 
-    @staticmethod
-    def _is_browser_search_explicit(query: str) -> bool:
-        triggers = (
-            "在浏览器",
-            "浏览器中",
-            "打开浏览器",
-            "用浏览器",
-            "browser",
-            "search_web",
-            "网页搜索",
-            "上网搜",
-            "去搜索引擎",
-        )
-        actions = ("搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query")
-        return any(t in query for t in triggers) and any(a in query for a in actions)
+    def _is_browser_automation_task(self, q: str) -> bool:
+        has_action = any(a in q for a in self._BROWSER_ACTIONS)
+        has_context = any(c in q for c in self._BROWSER_CONTEXT)
+        has_url = bool(re.search(r"https?://\S+", q))
+        return has_action and (has_context or has_url)
 
 
 class MetricsTracker:
@@ -131,7 +118,6 @@ class MCPClient:
     _whisper_lock = threading.Lock()
 
     def __init__(self):
-        """初始化 MCP 客户端"""
         self.exit_stack = AsyncExitStack()
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
@@ -148,7 +134,6 @@ class MCPClient:
         self.session: Optional[ClientSession] = None
         self.sessions: dict[str, ClientSession] = {}
         self.tool_to_session: dict[str, ClientSession] = {}
-
         self.query_planner = QueryPlanner()
         self.metrics = MetricsTracker()
 
@@ -248,9 +233,7 @@ class MCPClient:
             if mime_type.startswith("image/"):
                 file_size = os.path.getsize(file_path)
                 user_prompt_parts.append(f"用户上传了一张图片：{filename}（MIME: {mime_type}, 大小: {file_size} bytes）。")
-                user_prompt_parts.append(
-                    "当前接入模型为文本优先。请先给出执行建议，并要求用户补充图片文字描述或 OCR 文本。"
-                )
+                user_prompt_parts.append("当前接入模型为文本优先。请先给出执行建议，并要求用户补充图片文字描述或 OCR 文本。")
             else:
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -266,7 +249,6 @@ class MCPClient:
         decision = self.query_planner.decide(query)
         record["intent"] = decision.intent
         record["confidence"] = decision.confidence
-
         messages = [{"role": "user", "content": "\n\n".join(user_prompt_parts)}]
 
         try:
@@ -281,9 +263,6 @@ class MCPClient:
             available_tools = []
             for tool in all_tools:
                 name = tool.name
-
-                if name == "search_web" and not decision.allow_browser_search:
-                    continue
 
                 if decision.required_tools and name not in decision.required_tools and decision.intent != "qa":
                     if name not in {"query_weather", "get_weather_forecast"}:
@@ -312,8 +291,8 @@ class MCPClient:
                     {
                         "role": "system",
                         "content": (
-                            "你必须先调用 browser 工具读取网页，再输出结果。"
-                            "若用户未提供 URL，禁止跳转示例站点，优先读取当前活动页面。"
+                            "仅在用户要求对当前网页或给定 URL 执行操作时，才调用 browser 工具。"
+                            "不要进行浏览器搜索；未明确 URL 时优先读取当前活动页面。"
                         ),
                     },
                 )
@@ -337,9 +316,6 @@ class MCPClient:
                     record["tool_calls"] += 1
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments or "{}")
-
-                    if tool_name == "search_web" and not decision.allow_browser_search:
-                        return "你没有明确要求在浏览器中搜索，我已按普通问答处理。"
 
                     if decision.require_browser_tools and not has_explicit_url and self._contains_navigation_intent(tool_args):
                         messages.append(
@@ -368,5 +344,4 @@ class MCPClient:
             self.metrics.add(record)
 
     async def close(self) -> None:
-        """释放网络/MCP 资源，避免线程退出时泄漏。"""
         await self.exit_stack.aclose()
