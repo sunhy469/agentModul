@@ -1,57 +1,159 @@
-import os
 import json
 import mimetypes
+import os
 import re
 import shlex
-import httpx
-from typing import Optional, Any
+import threading
+import time
+from collections import deque
 from contextlib import AsyncExitStack
-from openai import OpenAI
+from dataclasses import dataclass
+from typing import Any, Optional
+
+import httpx
+import whisper
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-import whisper
+from openai import OpenAI
 from zhconv import convert
 
-# 加载 .env 文件，确保 API Key 受到保护
 load_dotenv()
-model = whisper.load_model("base")
+
+
+@dataclass(frozen=True)
+class PlanDecision:
+    """复杂任务规划结果。"""
+
+    intent: str
+    confidence: float
+    required_tools: set[str]
+    require_browser_tools: bool
+    allow_browser_search: bool
+
+
+class QueryPlanner:
+    """基于轻量规则评分的任务规划器（可替换为分类模型）。"""
+
+    _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+        "qa": ("解释", "问", "为什么", "怎么", "总结", "建议"),
+        "file": ("文件", "文档", "读取", "打开", "word", "docx", "pdf"),
+        "browser": ("网页", "网站", "url", "浏览器", "chrome", "抓取", "提取"),
+        "app": ("打开", "启动", "运行", "应用", "软件", "qq", "wechat"),
+        "complex": ("并且", "然后", "接着", "同时", "步骤", "复杂", "先", "后"),
+    }
+
+    _BROWSER_ACTIONS = ("搜索", "查", "search", "query", "翻译", "提取", "抓取", "读取")
+
+    def decide(self, query: str) -> PlanDecision:
+        q = (query or "").lower()
+        scores: dict[str, int] = {intent: 0 for intent in self._INTENT_KEYWORDS}
+
+        for intent, words in self._INTENT_KEYWORDS.items():
+            for word in words:
+                if word in q:
+                    scores[intent] += 1
+
+        # 多意图组合提升 complex 分值，体现步骤规划必要性
+        active_intents = sum(1 for k in ("file", "browser", "app") if scores[k] > 0)
+        if active_intents >= 2:
+            scores["complex"] += active_intents
+
+        best_intent = max(scores, key=scores.get)
+        total = sum(scores.values()) or 1
+        confidence = round(scores[best_intent] / total, 3)
+
+        allow_browser_search = self._is_browser_search_explicit(q)
+        require_browser_tools = scores["browser"] > 0 and any(a in q for a in self._BROWSER_ACTIONS)
+
+        required_tools: set[str] = set()
+        if scores["file"]:
+            required_tools.update({"find_and_read_local_file", "read_file", "list_local_files"})
+        if scores["app"]:
+            required_tools.add("open_local_application")
+        if scores["browser"] and allow_browser_search:
+            required_tools.add("search_web")
+        if scores["complex"]:
+            required_tools.add("execute_complex_instruction")
+
+        return PlanDecision(
+            intent=best_intent,
+            confidence=confidence,
+            required_tools=required_tools,
+            require_browser_tools=require_browser_tools,
+            allow_browser_search=allow_browser_search,
+        )
+
+    @staticmethod
+    def _is_browser_search_explicit(query: str) -> bool:
+        triggers = (
+            "在浏览器",
+            "浏览器中",
+            "打开浏览器",
+            "用浏览器",
+            "browser",
+            "search_web",
+            "网页搜索",
+            "上网搜",
+            "去搜索引擎",
+        )
+        actions = ("搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query")
+        return any(t in query for t in triggers) and any(a in query for a in actions)
+
+
+class MetricsTracker:
+    """记录任务规划和工具执行性能指标。"""
+
+    def __init__(self, max_records: int = 200):
+        self._records = deque(maxlen=max_records)
+
+    def add(self, item: dict[str, Any]) -> None:
+        self._records.append(item)
+
+    def summary(self) -> dict[str, Any]:
+        if not self._records:
+            return {"count": 0, "avg_total_ms": 0.0, "avg_tool_calls": 0.0, "error_rate": 0.0}
+
+        count = len(self._records)
+        total_ms = sum(float(r.get("total_ms", 0)) for r in self._records)
+        tool_calls = sum(int(r.get("tool_calls", 0)) for r in self._records)
+        errors = sum(1 for r in self._records if r.get("error"))
+        return {
+            "count": count,
+            "avg_total_ms": round(total_ms / count, 2),
+            "avg_tool_calls": round(tool_calls / count, 2),
+            "error_rate": round(errors / count, 3),
+        }
 
 
 class MCPClient:
+    _whisper_model = None
+    _whisper_lock = threading.Lock()
+
     def __init__(self):
         """初始化 MCP 客户端"""
         self.exit_stack = AsyncExitStack()
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL")
-        self.model = os.getenv("MODEL")
-
-        # 创建自定义HTTP客户端
-        http_client = httpx.Client(
-            base_url=self.base_url,
-            timeout=60.0,
-            follow_redirects=True
-        )
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
+        self.model = os.getenv("MODEL", "gpt-4o-mini").strip()
+        self.max_file_chars = int(os.getenv("MAX_FILE_CHARS", "12000"))
+        self.max_tool_rounds = int(os.getenv("MAX_TOOL_ROUNDS", "20"))
 
         if not self.openai_api_key:
-            print("⚠️ 未找到 API Key, 使用模拟模式")
-            self.openai_api_key = "dummy-key"
-            self.base_url = "http://localhost:8080"
-            self.model = "gpt-4o"
+            raise RuntimeError("缺少 OPENAI_API_KEY，请在 .env 中配置后再启动。")
 
-        self.client = OpenAI(
-            api_key=self.openai_api_key,
-            http_client=http_client
-        )
+        http_client = httpx.Client(base_url=self.base_url, timeout=60.0, follow_redirects=True)
+        self.client = OpenAI(api_key=self.openai_api_key, http_client=http_client)
 
         self.session: Optional[ClientSession] = None
         self.sessions: dict[str, ClientSession] = {}
         self.tool_to_session: dict[str, ClientSession] = {}
 
-    async def _connect_stdio_server(self, name: str, command: str, args: list[str]) -> list[Any]:
-        """连接一个 stdio MCP 服务并返回其工具列表。"""
-        server_params = StdioServerParameters(command=command, args=args, env=None)
+        self.query_planner = QueryPlanner()
+        self.metrics = MetricsTracker()
 
+    async def _connect_stdio_server(self, name: str, command: str, args: list[str]) -> list[Any]:
+        server_params = StdioServerParameters(command=command, args=args, env=None)
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
         stdio, write = stdio_transport
         session = await self.exit_stack.enter_async_context(ClientSession(stdio, write))
@@ -62,17 +164,13 @@ class MCPClient:
         return response.tools
 
     async def connect_to_server(self, server_script_path: str):
-        """连接本地 MCP 服务器，并可选接入 Browser MCP（Node 服务）。"""
-        is_python = server_script_path.endswith('.py')
-        is_js = server_script_path.endswith('.js')
-
+        is_python = server_script_path.endswith(".py")
+        is_js = server_script_path.endswith(".js")
         if not (is_python or is_js):
             raise ValueError("服务器脚本必须是 .py 或 .js 文件")
 
         local_command = "python" if is_python else "node"
         local_tools = await self._connect_stdio_server("local", local_command, [server_script_path])
-
-        # 保持兼容：默认 session 仍指向本地服务
         self.session = self.sessions["local"]
 
         all_tools = []
@@ -80,100 +178,60 @@ class MCPClient:
             self.tool_to_session[tool.name] = self.sessions["local"]
             all_tools.append(tool)
 
-        # 可选：接入 Browser MCP（Node 版）。默认关闭，不影响原有功能
         browser_enabled = os.getenv("ENABLE_BROWSER_MCP", "0").strip().lower() in {"1", "true", "yes"}
         if browser_enabled:
             browser_cmd = os.getenv("BROWSER_MCP_COMMAND", "npx")
-            raw_args = os.getenv("BROWSER_MCP_ARGS", "@agentdeskai/browser-tools-mcp@latest")
-            browser_args = shlex.split(raw_args)
-
+            browser_args = shlex.split(os.getenv("BROWSER_MCP_ARGS", "@agentdeskai/browser-tools-mcp@latest"))
             try:
                 browser_tools = await self._connect_stdio_server("browser", browser_cmd, browser_args)
                 for tool in browser_tools:
                     self.tool_to_session[tool.name] = self.sessions["browser"]
                     all_tools.append(tool)
-                print("\n 已接入 Browser MCP，新增工具:", [tool.name for tool in browser_tools])
+                print("\n已接入 Browser MCP，新增工具:", [tool.name for tool in browser_tools])
             except Exception as e:
-                print(f"\n ⚠️ Browser MCP 启动失败，已降级为仅本地工具: {e}")
+                print(f"\n⚠️ Browser MCP 启动失败，已降级为仅本地工具: {e}")
 
-        print("\n 已连接到服务器，支持以下工具:", [tool.name for tool in all_tools])
+        print("\n已连接到服务器，支持以下工具:", [tool.name for tool in all_tools])
         return all_tools
 
-
-
-    def _is_browser_search_explicit(self, query: str) -> bool:
-        """仅当用户明确要求在浏览器中搜索时，才允许调用 search_web 工具。"""
-        q = (query or "").lower()
-        triggers = [
-            "在浏览器", "浏览器中", "打开浏览器", "用浏览器", "browser","在浏览器中",
-            "search_web", "网页搜索", "上网搜", "去搜索引擎"
-        ]
-        actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]
-        return any(t in q for t in triggers) and any(a in q for a in actions)
-
-    def _is_browser_task(self, query: str) -> bool:
-        """判断用户是否在请求网页自动化（翻译网页/总结网页等）。"""
-        q = (query or "").lower()
-        browser_terms = ["网页", "网站", "browser", "chrome", "页面", "url", "链接", "devtools"]
-        task_terms = ["翻译", "总结", "提取", "分析", "抓取", "读取", "自动", "操作", "automation"]
-        return any(t in q for t in browser_terms) and any(t in q for t in task_terms)
-
-
-    def _extract_urls(self, text: str) -> list[str]:
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
         if not text:
             return []
-        pattern = r"https?://\S+"
-        return re.findall(pattern, text)
+        return re.findall(r"https?://\S+", text)
 
-    def _contains_navigation_intent(self, value):
-        """检测工具参数里是否包含 page.goto / browser_navigate 类跳转意图。"""
+    def _contains_navigation_intent(self, value: Any) -> bool:
         if isinstance(value, dict):
             return any(self._contains_navigation_intent(v) for v in value.values())
         if isinstance(value, list):
             return any(self._contains_navigation_intent(v) for v in value)
         if isinstance(value, str):
             lowered = value.lower()
-            signals = [
-                "page.goto(",
-                "browser_navigate",
-                "goto('https://www.example.com'",
-                "https://www.example.com",
-            ]
+            signals = ("page.goto(", "browser_navigate", "goto('https://www.example.com'", "https://www.example.com")
             return any(s in lowered for s in signals)
         return False
 
+    def _load_whisper_model(self):
+        if MCPClient._whisper_model is None:
+            with MCPClient._whisper_lock:
+                if MCPClient._whisper_model is None:
+                    MCPClient._whisper_model = whisper.load_model(os.getenv("WHISPER_MODEL", "base"))
+        return MCPClient._whisper_model
 
     async def transcribe_audio_file(self, audio_path: str) -> str:
-        """将音频文件转写为文本。"""
-
         if not os.path.exists(audio_path):
             return "语音文件不存在，请重新选择后再试。"
-
-        print(audio_path)
-
         try:
-            os.environ["FFMPEG_BINARY"] = r"D:\ffmpeg\bin\ffmpeg.exe"
-
-            result = model.transcribe(
-                audio_path,
-                language='zh',  # 指定中文
-                task='transcribe',  # 指定转写任务
-                fp16=False
-            )
-            print(result["text"])
-            text = result["text"]
-
-            text = convert(text, 'zh-cn')
-
-            if not text:
-                return "未识别到语音内容，请重试。"
-
-            return text.strip()
+            model = self._load_whisper_model()
+            result = model.transcribe(audio_path, language="zh", task="transcribe", fp16=False)
+            text = convert(result.get("text", ""), "zh-cn").strip()
+            return text or "未识别到语音内容，请重试。"
         except Exception as e:
             return f"语音识别失败: {e}"
 
     async def process_query(self, query: str, file_path: str = "") -> str:
-        """使用大模型处理查询并调用可用的 MCP 工具"""
+        start_time = time.perf_counter()
+        record = {"error": False, "tool_calls": 0, "intent": "unknown", "confidence": 0.0}
         user_prompt_parts = []
 
         if query:
@@ -189,129 +247,126 @@ class MCPClient:
 
             if mime_type.startswith("image/"):
                 file_size = os.path.getsize(file_path)
+                user_prompt_parts.append(f"用户上传了一张图片：{filename}（MIME: {mime_type}, 大小: {file_size} bytes）。")
                 user_prompt_parts.append(
-                    f"用户上传了一张图片：{filename}（MIME: {mime_type}, 大小: {file_size} bytes）。"
-                )
-                user_prompt_parts.append(
-                    "当前接入的模型接口仅支持文本消息，无法直接读取图片像素内容。"
-                    "请先基于用户问题给出可执行建议，并提示用户改为上传可读文本（如 txt/md）或补充图片文字描述。"
+                    "当前接入模型为文本优先。请先给出执行建议，并要求用户补充图片文字描述或 OCR 文本。"
                 )
             else:
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
-                        file_text = f.read()
+                        file_text = f.read(self.max_file_chars)
                 except UnicodeDecodeError:
-                    return "当前模型接口仅支持文本消息。非 UTF-8 文本文件请先转换为 UTF-8，或粘贴主要内容后再试。"
+                    return "当前模型接口仅支持 UTF-8 文本。请先转换编码后再试。"
 
-                user_prompt_parts.append(
-                    f"以下是用户上传文件（{filename}）的内容，请进行解析并总结：\n{file_text}"
-                )
+                user_prompt_parts.append(f"以下是用户上传文件（{filename}）内容（可能已截断）：\n{file_text}")
 
         if not user_prompt_parts:
             return "请输入问题或上传文件后再发送。"
 
+        decision = self.query_planner.decide(query)
+        record["intent"] = decision.intent
+        record["confidence"] = decision.confidence
+
         messages = [{"role": "user", "content": "\n\n".join(user_prompt_parts)}]
 
         try:
-            allow_browser_search = self._is_browser_search_explicit(query)
-            require_browser_tools = self._is_browser_task(query)
             explicit_urls = self._extract_urls(query)
             has_explicit_url = len(explicit_urls) > 0
-            available_tools = []
+
             all_tools = []
-            for server_name, server_session in self.sessions.items():
+            for _, server_session in self.sessions.items():
                 response = await server_session.list_tools()
                 all_tools.extend(response.tools)
 
+            available_tools = []
             for tool in all_tools:
-                if tool.name == "search_web" and not allow_browser_search:
+                name = tool.name
+
+                if name == "search_web" and not decision.allow_browser_search:
                     continue
+
+                if decision.required_tools and name not in decision.required_tools and decision.intent != "qa":
+                    if name not in {"query_weather", "get_weather_forecast"}:
+                        continue
 
                 available_tools.append(
                     {
                         "type": "function",
                         "function": {
-                            "name": tool.name,
+                            "name": name,
                             "description": tool.description,
-                            "parameters": tool.inputSchema
-                        }
+                            "parameters": tool.inputSchema,
+                        },
                     }
                 )
 
-            if require_browser_tools:
-                browser_tool_count = sum(
-                    1 for t in available_tools if "browser" in t["function"]["name"].lower()
-                )
+            if decision.require_browser_tools:
+                browser_tool_count = sum(1 for t in available_tools if "browser" in t["function"]["name"].lower())
                 if browser_tool_count == 0:
                     return (
                         "你当前问题需要浏览器自动化工具，但本次会话未检测到 Browser MCP 工具。\n"
-                        "请确认：\n"
-                        "1) .env 已设置 ENABLE_BROWSER_MCP=1\n"
-                        "2) BROWSER_MCP_COMMAND=npx\n"
-                        "3) BROWSER_MCP_ARGS=@agentdeskai/browser-tools-mcp@latest\n"
-                        "4) 新终端已运行 npx @agentdeskai/browser-tools-server@latest\n"
-                        "5) Chrome 扩展 BrowserToolsMCP 已安装并连接成功"
+                        "请确认 ENABLE_BROWSER_MCP=1，且 browser server 与扩展已连接成功。"
                     )
+                messages.insert(
+                    0,
+                    {
+                        "role": "system",
+                        "content": (
+                            "你必须先调用 browser 工具读取网页，再输出结果。"
+                            "若用户未提供 URL，禁止跳转示例站点，优先读取当前活动页面。"
+                        ),
+                    },
+                )
 
-                messages.insert(0, {
-                    "role": "system",
-                    "content": (
-                        "用户要求处理网页内容。你必须先调用 browser 相关工具读取内容，再输出翻译/总结。"
-                        "若用户未提供 URL，严禁跳转到任何示例站点（如 example.com），先读取当前活动页面；"
-                        "只有工具明确失败时，才向用户索取 URL。不要先回复操作建议。"
-                    )
-                })
-
-            # 支持多轮工具调用（网页自动化通常需要多步）
-            for _ in range(1000):
+            for _ in range(self.max_tool_rounds):
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     tools=available_tools,
-                    tool_choice="required" if require_browser_tools else "auto"
+                    tool_choice="required" if decision.require_browser_tools else "auto",
                 )
 
-                content = response.choices[0]
-                if content.finish_reason != "tool_calls":
-                    return content.message.content
+                choice = response.choices[0]
+                if choice.finish_reason != "tool_calls":
+                    return choice.message.content
 
-                tool_calls = content.message.tool_calls or []
-                messages.append(content.message.model_dump())
+                tool_calls = choice.message.tool_calls or []
+                messages.append(choice.message.model_dump())
 
                 for tool_call in tool_calls:
+                    record["tool_calls"] += 1
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments or "{}")
 
-                    if tool_name == "search_web" and not self._is_browser_search_explicit(query):
-                        return "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
+                    if tool_name == "search_web" and not decision.allow_browser_search:
+                        return "你没有明确要求在浏览器中搜索，我已按普通问答处理。"
 
-                    if require_browser_tools and not has_explicit_url and self._contains_navigation_intent(tool_args):
-                        messages.append({
-                            "role": "tool",
-                            "content": (
-                                "已阻止本次跳转：用户未提供 URL，禁止导航到示例页面。"
-                                "请改为读取当前 Chrome 活动页面内容后再翻译/总结。"
-                            ),
-                            "tool_call_id": tool_call.id,
-                        })
+                    if decision.require_browser_tools and not has_explicit_url and self._contains_navigation_intent(tool_args):
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": "已阻止跳转：用户未提供 URL，禁止导航到示例页面。请读取当前活动页面。",
+                                "tool_call_id": tool_call.id,
+                            }
+                        )
                         continue
 
                     call_session = self.tool_to_session.get(tool_name, self.session)
                     result = await call_session.call_tool(tool_name, tool_args)
-                    print(f"\n {result}")
-
                     tool_text = ""
                     if getattr(result, "content", None):
-                        tool_text = "\n".join(
-                            getattr(item, "text", str(item)) for item in result.content
-                        )
+                        tool_text = "\n".join(getattr(item, "text", str(item)) for item in result.content)
 
-                    messages.append({
-                        "role": "tool",
-                        "content": tool_text,
-                        "tool_call_id": tool_call.id,
-                    })
+                    messages.append({"role": "tool", "content": tool_text, "tool_call_id": tool_call.id})
 
             return "工具调用轮次过多，已停止。请缩小任务范围后重试。"
         except Exception as e:
-            return f"处理查询时出错 {str(e)}"
+            record["error"] = True
+            return f"处理查询时出错 {e}"
+        finally:
+            record["total_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
+            self.metrics.add(record)
+
+    async def close(self) -> None:
+        """释放网络/MCP 资源，避免线程退出时泄漏。"""
+        await self.exit_stack.aclose()
