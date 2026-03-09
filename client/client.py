@@ -42,8 +42,36 @@ class QueryPlanner:
         "complex": ("并且", "然后", "接着", "同时", "步骤", "复杂", "先", "后"),
     }
 
-    _BROWSER_ACTIONS = ("翻译", "提取", "抓取", "读取", "分析", "自动", "填写", "点击", "总结")
-    _BROWSER_CONTEXT = ("当前页面", "当前网页", "这个页面", "这个网页", "网页里", "页面里", "url", "链接")
+    _BROWSER_ACTIONS = (
+        "打开",
+        "访问",
+        "进入",
+        "跳转",
+        "翻译",
+        "提取",
+        "抓取",
+        "读取",
+        "分析",
+        "自动",
+        "填写",
+        "点击",
+        "总结",
+    )
+    _BROWSER_CONTEXT = (
+        "当前页面",
+        "当前网页",
+        "这个页面",
+        "这个网页",
+        "网页里",
+        "页面里",
+        "url",
+        "链接",
+        "浏览器",
+        "网站",
+        "官网",
+        "网页",
+        "页面",
+    )
 
     def decide(self, query: str) -> PlanDecision:
         q = (query or "").lower()
@@ -84,7 +112,7 @@ class QueryPlanner:
     def _is_browser_automation_task(self, q: str) -> bool:
         has_action = any(a in q for a in self._BROWSER_ACTIONS)
         has_context = any(c in q for c in self._BROWSER_CONTEXT)
-        has_url = bool(re.search(r"https?://\S+", q))
+        has_url = bool(re.search(r"(https?://\S+)|\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", q, re.IGNORECASE))
         return has_action and (has_context or has_url)
 
 
@@ -124,6 +152,8 @@ class MCPClient:
         self.model = os.getenv("MODEL", "gpt-4o-mini").strip()
         self.max_file_chars = int(os.getenv("MAX_FILE_CHARS", "12000"))
         self.max_tool_rounds = int(os.getenv("MAX_TOOL_ROUNDS", "20"))
+        self.enable_llm_planner = os.getenv("ENABLE_LLM_PLANNER", "1").strip().lower() in {"1", "true", "yes"}
+        self.planner_model = os.getenv("PLANNER_MODEL", self.model).strip()
 
         if not self.openai_api_key:
             raise RuntimeError("缺少 OPENAI_API_KEY，请在 .env 中配置后再启动。")
@@ -183,7 +213,89 @@ class MCPClient:
     def _extract_urls(text: str) -> list[str]:
         if not text:
             return []
-        return re.findall(r"https?://\S+", text)
+        urls = re.findall(r"https?://\S+", text)
+        if urls:
+            return urls
+
+        raw_domains = re.findall(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", text, flags=re.IGNORECASE)
+        normalized = []
+        for d in raw_domains:
+            d = d.rstrip("，。,.!?)）]\"")
+            normalized.append(f"https://{d}")
+        return normalized
+
+    def _has_browser_session(self) -> bool:
+        return "browser" in self.sessions
+
+    def _decide_with_llm(self, query: str) -> Optional[PlanDecision]:
+        """使用大模型做意图规划；失败时返回 None，由规则规划器兜底。"""
+        if not self.enable_llm_planner or not query.strip():
+            return None
+
+        prompt = (
+            "你是任务路由器。请根据用户输入判断任务意图并仅输出 JSON。\n"
+            "字段要求：\n"
+            "- intent: 只能是 qa/file/browser/app/complex\n"
+            "- confidence: 0~1 浮点\n"
+            "- require_browser_tools: 布尔\n"
+            "- required_tools: 数组，元素仅可为 find_and_read_local_file/read_file/list_local_files/open_local_application/execute_complex_instruction\n"
+            "判断原则：如果用户要求打开/访问网站、操作网页、提取网页内容，require_browser_tools 应为 true。\n"
+            "无协议域名（如 chaoxing.com）也应视作网页目标。"
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.planner_model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": query},
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            content = (response.choices[0].message.content or "").strip()
+            data = json.loads(content)
+
+            intent = str(data.get("intent", "qa")).lower()
+            if intent not in {"qa", "file", "browser", "app", "complex"}:
+                intent = "qa"
+
+            confidence = float(data.get("confidence", 0.6))
+            confidence = min(1.0, max(0.0, confidence))
+
+            allowed = {
+                "find_and_read_local_file",
+                "read_file",
+                "list_local_files",
+                "open_local_application",
+                "execute_complex_instruction",
+            }
+            required_tools = {str(x) for x in data.get("required_tools", []) if str(x) in allowed}
+            require_browser_tools = bool(data.get("require_browser_tools", False))
+
+            return PlanDecision(
+                intent=intent,
+                confidence=round(confidence, 3),
+                required_tools=required_tools,
+                require_browser_tools=require_browser_tools,
+            )
+        except Exception:
+            return None
+
+    def _decide_plan(self, query: str) -> PlanDecision:
+        """优先使用大模型意图判断，规则规划器做兜底和合并。"""
+        rule_decision = self.query_planner.decide(query)
+        llm_decision = self._decide_with_llm(query)
+        if llm_decision is None:
+            return rule_decision
+
+        # 合并：尽量采用 LLM 意图，同时用规则保证浏览器任务不漏判
+        return PlanDecision(
+            intent=llm_decision.intent,
+            confidence=max(llm_decision.confidence, rule_decision.confidence),
+            required_tools=llm_decision.required_tools | rule_decision.required_tools,
+            require_browser_tools=llm_decision.require_browser_tools or rule_decision.require_browser_tools,
+        )
 
     def _contains_navigation_intent(self, value: Any) -> bool:
         if isinstance(value, dict):
@@ -246,7 +358,7 @@ class MCPClient:
         if not user_prompt_parts:
             return "请输入问题或上传文件后再发送。"
 
-        decision = self.query_planner.decide(query)
+        decision = self._decide_plan(query)
         record["intent"] = decision.intent
         record["confidence"] = decision.confidence
         messages = [{"role": "user", "content": "\n\n".join(user_prompt_parts)}]
@@ -280,8 +392,7 @@ class MCPClient:
                 )
 
             if decision.require_browser_tools:
-                browser_tool_count = sum(1 for t in available_tools if "browser" in t["function"]["name"].lower())
-                if browser_tool_count == 0:
+                if not self._has_browser_session():
                     return (
                         "你当前问题需要浏览器自动化工具，但本次会话未检测到 Browser MCP 工具。\n"
                         "请确认 ENABLE_BROWSER_MCP=1，且 browser server 与扩展已连接成功。"
@@ -292,7 +403,9 @@ class MCPClient:
                         "role": "system",
                         "content": (
                             "仅在用户要求对当前网页或给定 URL 执行操作时，才调用 browser 工具。"
-                            "不要进行浏览器搜索；未明确 URL 时优先读取当前活动页面。"
+                            "不要进行浏览器搜索。"
+                            "当用户提供域名（例如 chaoxing.com）但不带协议时，将其视为 https URL。"
+                            "未明确 URL 时优先读取当前活动页面。"
                         ),
                     },
                 )
