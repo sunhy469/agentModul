@@ -42,8 +42,36 @@ class QueryPlanner:
         "complex": ("并且", "然后", "接着", "同时", "步骤", "复杂", "先", "后"),
     }
 
-    _BROWSER_ACTIONS = ("翻译", "提取", "抓取", "读取", "分析", "自动", "填写", "点击", "总结")
-    _BROWSER_CONTEXT = ("当前页面", "当前网页", "这个页面", "这个网页", "网页里", "页面里", "url", "链接")
+    _BROWSER_ACTIONS = (
+        "打开",
+        "访问",
+        "进入",
+        "跳转",
+        "翻译",
+        "提取",
+        "抓取",
+        "读取",
+        "分析",
+        "自动",
+        "填写",
+        "点击",
+        "总结",
+    )
+    _BROWSER_CONTEXT = (
+        "当前页面",
+        "当前网页",
+        "这个页面",
+        "这个网页",
+        "网页里",
+        "页面里",
+        "url",
+        "链接",
+        "浏览器",
+        "网站",
+        "官网",
+        "网页",
+        "页面",
+    )
 
     def decide(self, query: str) -> PlanDecision:
         q = (query or "").lower()
@@ -84,7 +112,7 @@ class QueryPlanner:
     def _is_browser_automation_task(self, q: str) -> bool:
         has_action = any(a in q for a in self._BROWSER_ACTIONS)
         has_context = any(c in q for c in self._BROWSER_CONTEXT)
-        has_url = bool(re.search(r"https?://\S+", q))
+        has_url = bool(re.search(r"(https?://\S+)|\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", q, re.IGNORECASE))
         return has_action and (has_context or has_url)
 
 
@@ -183,7 +211,19 @@ class MCPClient:
     def _extract_urls(text: str) -> list[str]:
         if not text:
             return []
-        return re.findall(r"https?://\S+", text)
+        urls = re.findall(r"https?://\S+", text)
+        if urls:
+            return urls
+
+        raw_domains = re.findall(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?", text, flags=re.IGNORECASE)
+        normalized = []
+        for d in raw_domains:
+            d = d.rstrip("，。,.!?)）]\"")
+            normalized.append(f"https://{d}")
+        return normalized
+
+    def _has_browser_session(self) -> bool:
+        return "browser" in self.sessions
 
     def _contains_navigation_intent(self, value: Any) -> bool:
         if isinstance(value, dict):
@@ -280,8 +320,7 @@ class MCPClient:
                 )
 
             if decision.require_browser_tools:
-                browser_tool_count = sum(1 for t in available_tools if "browser" in t["function"]["name"].lower())
-                if browser_tool_count == 0:
+                if not self._has_browser_session():
                     return (
                         "你当前问题需要浏览器自动化工具，但本次会话未检测到 Browser MCP 工具。\n"
                         "请确认 ENABLE_BROWSER_MCP=1，且 browser server 与扩展已连接成功。"
@@ -292,7 +331,9 @@ class MCPClient:
                         "role": "system",
                         "content": (
                             "仅在用户要求对当前网页或给定 URL 执行操作时，才调用 browser 工具。"
-                            "不要进行浏览器搜索；未明确 URL 时优先读取当前活动页面。"
+                            "不要进行浏览器搜索。"
+                            "当用户提供域名（例如 chaoxing.com）但不带协议时，将其视为 https URL。"
+                            "未明确 URL 时优先读取当前活动页面。"
                         ),
                     },
                 )
