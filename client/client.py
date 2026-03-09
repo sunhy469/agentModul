@@ -308,6 +308,11 @@ class MCPClient:
             return any(s in lowered for s in signals)
         return False
 
+    @staticmethod
+    def _is_search_tool_name(tool_name: str) -> bool:
+        lowered = (tool_name or "").lower()
+        return any(k in lowered for k in ("search", "bing", "google"))
+
     def _load_whisper_model(self):
         if MCPClient._whisper_model is None:
             with MCPClient._whisper_lock:
@@ -366,6 +371,8 @@ class MCPClient:
         try:
             explicit_urls = self._extract_urls(query)
             has_explicit_url = len(explicit_urls) > 0
+            target_url = explicit_urls[0] if explicit_urls else ""
+            navigated_to_explicit_url = False
 
             all_tools = []
             for _, server_session in self.sessions.items():
@@ -409,6 +416,19 @@ class MCPClient:
                         ),
                     },
                 )
+                if has_explicit_url:
+                    messages.insert(
+                        1,
+                        {
+                            "role": "system",
+                            "content": (
+                                f"用户已明确给出目标网址：{target_url}。"
+                                "请直接导航到该网址并继续后续操作。"
+                                "禁止调用任何搜索引擎相关工具（如 google/bing/search）。"
+                                "同一轮任务最多只做一次外部导航，避免重复打开多个页面。"
+                            ),
+                        },
+                    )
 
             for _ in range(self.max_tool_rounds):
                 response = self.client.chat.completions.create(
@@ -430,6 +450,31 @@ class MCPClient:
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments or "{}")
 
+                    if decision.require_browser_tools and has_explicit_url and self._is_search_tool_name(tool_name):
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": f"已阻止调用搜索工具 {tool_name}：用户已提供明确网址 {target_url}，应直接访问该网址。",
+                                "tool_call_id": tool_call.id,
+                            }
+                        )
+                        continue
+
+                    if (
+                        decision.require_browser_tools
+                        and has_explicit_url
+                        and navigated_to_explicit_url
+                        and self._contains_navigation_intent(tool_args)
+                    ):
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": "已阻止重复导航：本轮任务已完成一次显式 URL 导航，请继续在当前页面执行后续步骤。",
+                                "tool_call_id": tool_call.id,
+                            }
+                        )
+                        continue
+
                     if decision.require_browser_tools and not has_explicit_url and self._contains_navigation_intent(tool_args):
                         messages.append(
                             {
@@ -445,6 +490,9 @@ class MCPClient:
                     tool_text = ""
                     if getattr(result, "content", None):
                         tool_text = "\n".join(getattr(item, "text", str(item)) for item in result.content)
+
+                    if decision.require_browser_tools and has_explicit_url and self._contains_navigation_intent(tool_args):
+                        navigated_to_explicit_url = True
 
                     messages.append({"role": "tool", "content": tool_text, "tool_call_id": tool_call.id})
 
