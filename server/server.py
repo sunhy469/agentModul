@@ -4,10 +4,9 @@ import platform
 import shlex
 import shutil
 import subprocess
-import webbrowser
+import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
 
 import httpx
 from docx import Document
@@ -24,6 +23,7 @@ USER_AGENT = "weather-app/1.0"
 # 保存目录（建议固定目录）
 BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
+SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -163,8 +163,25 @@ def _safe_read_file(file_path: Path, max_chars: int = 12000) -> str:
 
 def _resolve_search_root(directory: str = "") -> Path:
     if directory.strip():
-        return Path(directory).expanduser().resolve()
-    return Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).resolve()
+        target = Path(directory).expanduser().resolve()
+    else:
+        target = Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).resolve()
+
+    # 安全边界：仅允许在 SAFE_ROOT 下检索
+    try:
+        target.relative_to(SAFE_ROOT)
+    except ValueError:
+        return SAFE_ROOT
+
+    return target
+
+
+def _is_within_safe_root(target: Path) -> bool:
+    try:
+        target.resolve().relative_to(SAFE_ROOT)
+        return True
+    except Exception:
+        return False
 
 
 def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | None, str]:
@@ -313,6 +330,10 @@ def _build_launch_command(app_command: str, arguments: str = "") -> list[str]:
     if not raw:
         return []
 
+    blocked_tokens = ["&&", "||", ";", "|", "`", "$("]
+    if any(token in raw for token in blocked_tokens) or any(token in arguments for token in blocked_tokens):
+        return []
+
     if system_name == "windows":
         executable = _resolve_windows_app_path(raw) or raw
         args = shlex.split(arguments, posix=False) if arguments.strip() else []
@@ -348,33 +369,6 @@ def open_local_application(app_command: str, arguments: str = "") -> str:
         return f"启动应用失败: {e}"
 
 
-@mcp.tool()
-def search_web(query: str, engine: str = "bing") -> str:
-    """
-    在默认浏览器中执行搜索。
-    :param query: 搜索关键词
-    :param engine: 搜索引擎（bing/google/baidu）
-    """
-    query = query.strip()
-    if not query:
-        return "请提供搜索关键词。"
-
-    engine_map = {
-        "bing": "https://www.bing.com/search?q={}",
-        "google": "https://www.google.com/search?q={}",
-        "baidu": "https://www.baidu.com/s?wd={}"
-    }
-    template = engine_map.get(engine.lower(), engine_map["bing"])
-    url = template.format(quote_plus(query))
-
-    ok = webbrowser.open(url)
-    if ok:
-        return f"已在浏览器打开搜索：{url}"
-    return f"尝试打开浏览器失败，请手动访问：{url}"
-
-
-
-
 def _open_with_default_app(target: Path) -> None:
     """按系统默认方式打开文件。"""
     system_name = platform.system().lower()
@@ -400,6 +394,8 @@ def read_file(file_path: str, open_with_default: bool = True) -> str:
         target = Path(file_path).expanduser().resolve()
         if not target.exists() or not target.is_file():
             return f"文件不存在：{target}"
+        if not _is_within_safe_root(target):
+            return f"拒绝访问：目标超出安全目录 {SAFE_ROOT}"
 
         if open_with_default:
             _open_with_default_app(target)
@@ -486,8 +482,6 @@ def execute_complex_instruction(
         requirement: str = "",
         app_command: str = "",
         app_arguments: str = "",
-        web_query: str = "",
-        web_engine: str = "bing",
         export_word_name: str = "",
         export_word_content: str = "",
 ) -> str:
@@ -503,11 +497,12 @@ def execute_complex_instruction(
     - directory: 可选搜索目录
     - open_file/read_content/requirement: 文件处理行为控制
     - app_command/app_arguments: 应用启动步骤
-    - web_query/web_engine: 浏览器搜索步骤（仅当明确传入 web_query 时执行）
     - export_word_name/export_word_content: 文档导出步骤
     """
     try:
+        begin = time.perf_counter()
         steps: list[str] = []
+        timings: list[str] = []
         if instruction.strip():
             steps.append(f"复杂指令：{instruction.strip()}")
 
@@ -515,6 +510,7 @@ def execute_complex_instruction(
 
         # 1) 文件查找/读取/打开
         if file_keyword.strip():
+            t0 = time.perf_counter()
             target, err = _find_file_by_keyword(file_keyword, directory)
             if err:
                 steps.append(f"[文件步骤失败] {err}")
@@ -531,29 +527,31 @@ def execute_complex_instruction(
 
                 if requirement.strip():
                     steps.append(f"[文件步骤] 解析需求：{requirement.strip()}")
+            timings.append(f"[耗时] 文件阶段: {(time.perf_counter() - t0) * 1000:.2f} ms")
 
         # 2) 打开应用
         if app_command.strip():
+            t1 = time.perf_counter()
             app_result = open_local_application(app_command, app_arguments)
             steps.append(f"[应用步骤] {app_result}")
+            timings.append(f"[耗时] 应用阶段: {(time.perf_counter() - t1) * 1000:.2f} ms")
 
-        # 3) 浏览器搜索（由模型明确传入 web_query 才执行）
-        if web_query.strip():
-            web_result = search_web(web_query, web_engine)
-            steps.append(f"[搜索步骤] {web_result}")
-
-        # 4) 导出 Word
+        # 3) 导出 Word
         final_export_name = export_word_name.strip()
         final_export_content = export_word_content.strip()
         if final_export_name:
+            t3 = time.perf_counter()
             if not final_export_content:
                 final_export_content = content_cache[:3000] if content_cache else "（未提供导出内容）"
             export_result = create_word_file(final_export_name, final_export_content)
             steps.append(f"[导出步骤] {export_result}")
+            timings.append(f"[耗时] 导出阶段: {(time.perf_counter() - t3) * 1000:.2f} ms")
 
         if len(steps) == 0:
             return "未接收到可执行的复杂步骤参数，请由模型先解析意图后传入结构化参数。"
 
+        steps.extend(timings)
+        steps.append(f"[性能汇总] 总耗时: {(time.perf_counter() - begin) * 1000:.2f} ms")
         return "\n".join(steps)
     except Exception as e:
         return f"复杂指令执行失败: {e}"
