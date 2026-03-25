@@ -844,37 +844,74 @@ def send_desktop_message(
         launch = "检测到 QQ 已在运行，跳过重复启动。"
     else:
         launch = open_local_application(app_command, "")
-    pyperclip.copy(message)
     time.sleep(max(0.5, min(warmup_seconds, 10.0)))
+
+    qq_window_box: tuple[int, int, int, int] | None = None
+    if app_command.lower() == "qq":
+        try:
+            import pygetwindow as gw
+            windows = gw.getWindowsWithTitle("QQ")
+            if windows:
+                w = windows[0]
+                if w.isMinimized:
+                    w.restore()
+                w.activate()
+                qq_window_box = (w.left, w.top, w.width, w.height)
+                time.sleep(0.25)
+        except Exception:
+            qq_window_box = None
 
     # 若提供会话名，先在 IM 中搜索并进入对应会话
     if conversation_name.strip():
-        pyperclip.copy(conversation_name.strip())
-        if platform.system().lower() == "darwin":
+        if app_command.lower() == "qq" and qq_window_box:
+            left, top, width, _ = qq_window_box
+            # 点击 QQ 搜索框
+            pyautogui.click(left + int(width * 0.24), top + 36)
+            time.sleep(0.1)
+            pyautogui.hotkey("ctrl", "a")
+            pyautogui.press("backspace")
+            pyautogui.write(conversation_name.strip(), interval=0.03)
+            time.sleep(0.2)
+            pyautogui.press("enter")
+            time.sleep(0.3)
+            # 点击第一条会话，确保真正进入聊天
+            pyautogui.click(left + int(width * 0.24), top + 126)
+            time.sleep(0.2)
+        elif platform.system().lower() == "darwin":
+            pyperclip.copy(conversation_name.strip())
             pyautogui.hotkey("command", "f")
             time.sleep(0.1)
             pyautogui.hotkey("command", "v")
         else:
+            pyperclip.copy(conversation_name.strip())
             pyautogui.hotkey("ctrl", "f")
             time.sleep(0.1)
             pyautogui.hotkey("ctrl", "v")
         time.sleep(0.2)
         pyautogui.press("enter")
         time.sleep(0.4)
-        pyperclip.copy(message)
 
     # 尝试将焦点切到聊天输入框（对 QQ/飞书等桌面 IM 更稳定）
     if focus_input_click:
         try:
-            screen_w, screen_h = pyautogui.size()
-            pyautogui.click(int(screen_w * 0.72), int(screen_h * 0.92))
+            if app_command.lower() == "qq" and qq_window_box:
+                left, top, width, height = qq_window_box
+                pyautogui.click(left + int(width * 0.70), top + int(height * 0.86))
+            else:
+                screen_w, screen_h = pyautogui.size()
+                pyautogui.click(int(screen_w * 0.72), int(screen_h * 0.92))
             time.sleep(0.2)
         except Exception:
             pass
 
-    if platform.system().lower() == "darwin":
+    # 优先采用“键盘输入”，仅在非 ASCII 文本时回退剪贴板粘贴
+    if message.isascii():
+        pyautogui.write(message, interval=0.01)
+    elif platform.system().lower() == "darwin":
+        pyperclip.copy(message)
         pyautogui.hotkey("command", "v")
     else:
+        pyperclip.copy(message)
         pyautogui.hotkey("ctrl", "v")
         # Windows 下部分场景 Ctrl+V 不生效，补一个 Shift+Insert 兜底
         time.sleep(0.1)
@@ -887,7 +924,7 @@ def send_desktop_message(
     return (
         f"{launch}\n"
         f"已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
-        f"{'（已尝试点击输入框并使用双重粘贴兜底）' if focus_input_click else ''}"
+        f"{'（已尝试点击输入框、搜索会话并执行输入）' if focus_input_click else ''}"
     )
 
 
