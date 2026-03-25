@@ -131,12 +131,17 @@ class MCPClient:
                     windows_args = []
 
             if windows_args:
-                # 兼容：若命令不存在，自动回退到 python
+                # 兼容：若 uv 不在 PATH，回退到 `python -m uv`
                 if not shutil.which(windows_cmd):
-                    fallback_cmd = "python"
-                    if shutil.which(fallback_cmd):
-                        print(f"\n⚠️ 未找到命令 {windows_cmd}，自动回退为 {fallback_cmd}。")
-                        windows_cmd = fallback_cmd
+                    if windows_cmd in {"uv", "uvx"} and shutil.which("python"):
+                        print(f"\n⚠️ 未找到命令 {windows_cmd}，自动回退为 `python -m uv`。")
+                        windows_cmd = "python"
+                        windows_args = ["-m", "uv", *windows_args]
+                    else:
+                        fallback_cmd = "python"
+                        if shutil.which(fallback_cmd):
+                            print(f"\n⚠️ 未找到命令 {windows_cmd}，自动回退为 {fallback_cmd}。")
+                            windows_cmd = fallback_cmd
 
                 # 兼容：若 args 仅是 *.py 脚本路径，则应使用 python 执行而非 uv
                 if (
