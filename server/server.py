@@ -577,42 +577,40 @@ def analyze_time_series(values: list[float], horizon: int = 3) -> str:
     )
 
 
-@mcp.tool()
-async def send_webhook_message(
-    text: str,
-    provider: str = "generic",
-) -> str:
-    """
-    发送 webhook 消息，可用于飞书/企业微信/自定义机器人通知。
-    """
-    if not text.strip():
-        return "text 不能为空。"
+def _resolve_feishu_robot_url(robot_name: str = "default") -> str:
+    normalized = (robot_name or "default").strip().upper().replace("-", "_")
+    if normalized == "DEFAULT":
+        return os.getenv("FEISHU_ROBOT_URL", "").strip() or os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+    return (
+        os.getenv(f"FEISHU_ROBOT_{normalized}_URL", "").strip()
+        or os.getenv("FEISHU_ROBOT_URL", "").strip()
+        or os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+    )
 
-    provider_key = provider.strip().lower()
-    if provider_key in {"feishu", "lark"}:
-        resolved_webhook = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
-    else:
-        resolved_webhook = os.getenv("DEFAULT_WEBHOOK_URL", "").strip()
-    if not resolved_webhook.startswith("http"):
-        return (
-            "webhook_url 未配置或无效。请在 MCP server 进程环境中配置 FEISHU_WEBHOOK_URL / DEFAULT_WEBHOOK_URL。"
-        )
 
-    if provider_key in {"feishu", "lark"}:
-        payload = {"msg_type": "text", "content": {"text": text}}
-    else:
-        payload = {"text": text}
-
+async def _send_feishu_message(message: str, robot_name: str = "default") -> str:
+    if not message.strip():
+        return "message 不能为空。"
+    robot_url = _resolve_feishu_robot_url(robot_name)
+    if not robot_url.startswith("http"):
+        return "飞书机器人地址未配置，请在 MCP server 环境中设置 FEISHU_ROBOT_URL。"
+    payload = {"msg_type": "text", "content": {"text": message}}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(resolved_webhook, json=payload)
-            content = resp.text[:300]
-            return (
-                f"Webhook 已发送，provider={provider_key or 'generic'}，HTTP {resp.status_code}，"
-                f"响应片段：{content}"
-            )
+            resp = await client.post(robot_url, json=payload)
+            return f"飞书机器人发送完成，HTTP {resp.status_code}。"
     except Exception as exc:
-        return f"Webhook 发送失败: {exc}"
+        return f"飞书机器人发送失败: {exc}"
+
+
+@mcp.tool()
+async def send_feishu_robot_message(message: str, robot_name: str = "default") -> str:
+    """
+    使用飞书机器人发送消息。
+    :param message: 要发送的文本
+    :param robot_name: 机器人别名（默认 default）
+    """
+    return await _send_feishu_message(message=message, robot_name=robot_name)
 
 
 @mcp.tool()
@@ -624,7 +622,7 @@ def summarize_local_capabilities() -> str:
         "当前本地自动化能力：\n"
         "1) 文件系统：查找/读取/列举/待确认修改删除。\n"
         "2) 本地应用：按命令启动应用（可用于拉起 QQ、飞书、浏览器）。\n"
-        "3) 通知消息：支持 webhook 发送（飞书机器人/自定义服务）。\n"
+        "3) 通知消息：支持飞书机器人发送。\n"
         "4) 桌面 IM：支持自动粘贴并发送消息（依赖 pyautogui + pyperclip）。\n"
         "5) 文档处理：可创建 Word 文件并导出。\n"
         "6) 时间序列：基础统计与趋势预测。"
@@ -688,7 +686,7 @@ async def send_message_by_request(
 ) -> str:
     """
     根据请求自动选择飞书或 QQ 发送消息。
-    - 飞书：优先参数 webhook_url，否则读 FEISHU_WEBHOOK_URL
+    - 飞书：调用飞书机器人发送
     - QQ：调用桌面自动发送
     """
     channel = preferred_channel.strip().lower()
@@ -699,13 +697,10 @@ async def send_message_by_request(
         return "消息内容为空，请提供 request 或 message。"
 
     if channel == "unsupported":
-        return "检测到目标为 Facebook/Messenger，当前仅支持飞书 webhook 与 QQ 桌面发送。"
+        return "检测到目标为 Facebook/Messenger，当前仅支持飞书机器人与 QQ 桌面发送。"
 
     if channel in {"feishu", "lark"}:
-        return await send_webhook_message(
-            text=final_message,
-            provider="feishu",
-        )
+        return await send_feishu_robot_message(message=final_message)
     if channel == "qq":
         return send_desktop_message(
             app_command=qq_app_command,
