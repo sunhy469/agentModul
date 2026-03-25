@@ -588,6 +588,35 @@ def _resolve_feishu_robot_url(robot_name: str = "default") -> str:
     )
 
 
+async def _get_feishu_tenant_access_token() -> tuple[str, str]:
+    app_id = os.getenv("FEISHU_APP_ID", "").strip()
+    app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        return "", "缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET 环境变量。"
+
+    token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    payload = {
+        "app_id": app_id,
+        "app_secret": app_secret,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(token_url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return "", f"获取 tenant_access_token 失败: {exc}"
+
+    if data.get("code") != 0:
+        return "", f"获取 tenant_access_token 失败: code={data.get('code')}, msg={data.get('msg')}"
+
+    token = data.get("tenant_access_token", "")
+    if not token:
+        return "", "获取 tenant_access_token 成功但响应中无 tenant_access_token。"
+    return token, ""
+
+
 async def _upload_feishu_image(image_path: str, tenant_access_token: str) -> tuple[str, str]:
     if not image_path.strip():
         return "", "image_path 不能为空。"
@@ -626,7 +655,6 @@ async def _send_feishu_message(
         link_text: str = "",
         link_href: str = "",
         image_path: str = "",
-        tenant_access_token: str = "",
 ) -> str:
     if not message.strip():
         return "message 不能为空。"
@@ -636,7 +664,11 @@ async def _send_feishu_message(
         return "未配置 FEISHU_WEBHOOK_URL。"
 
     if image_path.strip():
-        image_key, err = await _upload_feishu_image(image_path=image_path, tenant_access_token=tenant_access_token)
+        token, token_err = await _get_feishu_tenant_access_token()
+        if token_err:
+            return token_err
+
+        image_key, err = await _upload_feishu_image(image_path=image_path, tenant_access_token=token)
         if err:
             return err
         payload: dict[str, Any] = {
@@ -676,7 +708,6 @@ async def send_feishu_robot_message(
         link_text: str = "",
         link_href: str = "",
         image_path: str = "",
-        tenant_access_token: str = "",
 ) -> str:
     """
     使用飞书机器人发送消息（支持 text、带超链接的 post、image）。
@@ -684,14 +715,12 @@ async def send_feishu_robot_message(
     :param link_text: 超链接显示文字（可选）
     :param link_href: 超链接地址（可选）
     :param image_path: 本地图片路径（可选，存在时发送 image 消息）
-    :param tenant_access_token: 飞书 tenant_access_token（发送图片时必填）
     """
     return await _send_feishu_message(
         message=message,
         link_text=link_text,
         link_href=link_href,
         image_path=image_path,
-        tenant_access_token=tenant_access_token,
     )
 
 
