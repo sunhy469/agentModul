@@ -2,6 +2,7 @@ import mimetypes
 import os
 import shlex
 import base64
+import shutil
 from contextlib import AsyncExitStack
 from typing import Optional, Any
 
@@ -130,6 +131,23 @@ class MCPClient:
                     windows_args = []
 
             if windows_args:
+                # 兼容：若命令不存在，自动回退到 python
+                if not shutil.which(windows_cmd):
+                    fallback_cmd = "python"
+                    if shutil.which(fallback_cmd):
+                        print(f"\n⚠️ 未找到命令 {windows_cmd}，自动回退为 {fallback_cmd}。")
+                        windows_cmd = fallback_cmd
+
+                # 兼容：若 args 仅是 *.py 脚本路径，则应使用 python 执行而非 uv
+                if (
+                    len(windows_args) == 1
+                    and str(windows_args[0]).lower().endswith(".py")
+                    and windows_cmd in {"uv", "uvx"}
+                ):
+                    if shutil.which("python"):
+                        print("\n⚠️ 检测到 WINDOWS_MCP_ARGS 为 Python 脚本路径，自动改为 python 执行。")
+                        windows_cmd = "python"
+
                 try:
                     windows_tools = await self._connect_stdio_server("windows", windows_cmd, windows_args)
                     for tool in windows_tools:
