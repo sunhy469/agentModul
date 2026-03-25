@@ -114,12 +114,22 @@ class MCPClient:
 
         windows_enabled = os.getenv("ENABLE_WINDOWS_MCP", "0").strip().lower() in {"1", "true", "yes"}
         if windows_enabled:
-            windows_cmd = os.getenv("WINDOWS_MCP_COMMAND", "npx")
+            windows_cmd = os.getenv("WINDOWS_MCP_COMMAND", "uv")
             raw_args = os.getenv("WINDOWS_MCP_ARGS", "")
-            if not raw_args.strip():
-                print("\n⚠️ ENABLE_WINDOWS_MCP 已开启，但未配置 WINDOWS_MCP_ARGS，跳过接入。")
-            else:
+            if raw_args.strip():
                 windows_args = shlex.split(raw_args)
+            else:
+                windows_dir = os.getenv("WINDOWS_MCP_DIR", "").strip()
+                if windows_dir:
+                    # 对齐 Cursor MCP 配置风格：
+                    # command: uv
+                    # args: ["--directory", "C:/AI/Windows-MCP", "run", "main.py"]
+                    windows_args = ["--directory", windows_dir, "run", "main.py"]
+                else:
+                    print("\n⚠️ ENABLE_WINDOWS_MCP 已开启，但未配置 WINDOWS_MCP_ARGS 或 WINDOWS_MCP_DIR，跳过接入。")
+                    windows_args = []
+
+            if windows_args:
                 try:
                     windows_tools = await self._connect_stdio_server("windows", windows_cmd, windows_args)
                     for tool in windows_tools:
