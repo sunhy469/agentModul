@@ -5,15 +5,18 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
 from docx import Document
+from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 # 初始化 MCP 服务器
 mcp = FastMCP("WeatherServer")
+load_dotenv()
 
 # OpenWeather API 配置
 OPENWEATHER_API_BASE = "https://api.openweathermap.org/data/2.5/weather"
@@ -24,6 +27,7 @@ USER_AGENT = "weather-app/1.0"
 BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
 SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
+PENDING_FILE_OPERATIONS: dict[str, dict[str, Any]] = {}
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -182,6 +186,17 @@ def _is_within_safe_root(target: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _ensure_safe_target(file_path: str) -> tuple[Path | None, str]:
+    if not file_path.strip():
+        return None, "请提供文件路径。"
+    target = Path(file_path).expanduser().resolve()
+    if not target.exists() or not target.is_file():
+        return None, f"文件不存在：{target}"
+    if not _is_within_safe_root(target):
+        return None, f"拒绝访问：目标超出安全目录 {SAFE_ROOT}"
+    return target, ""
 
 
 def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | None, str]:
@@ -468,6 +483,233 @@ def list_local_files(directory: str = "", keyword: str = "", limit: int = 20) ->
         return "\n".join(lines)
     except Exception as e:
         return f"列出文件失败: {e}"
+
+
+@mcp.tool()
+def create_pending_file_operation(
+        operation: str,
+        file_path: str,
+        new_content: str = "",
+        reason: str = "",
+) -> str:
+    """
+    创建待确认文件操作（delete/modify），用于双重安全确认。
+    """
+    op = operation.strip().lower()
+    if op not in {"delete", "modify"}:
+        return "operation 仅支持 delete 或 modify。"
+
+    target, err = _ensure_safe_target(file_path)
+    if err:
+        return err
+
+    if op == "modify" and not new_content.strip():
+        return "modify 操作必须提供 new_content。"
+
+    operation_id = uuid.uuid4().hex[:12]
+    PENDING_FILE_OPERATIONS[operation_id] = {
+        "operation": op,
+        "target": str(target),
+        "new_content": new_content,
+        "reason": reason.strip(),
+        "created_at": time.time(),
+    }
+    return (
+        f"已创建待确认操作，operation_id={operation_id}\n"
+        f"类型: {op}\n目标: {target}\n"
+        "请调用 confirm_file_operation(operation_id, confirm=True) 执行；"
+        "若取消请传 confirm=False。"
+    )
+
+
+@mcp.tool()
+def confirm_file_operation(operation_id: str, confirm: bool) -> str:
+    """
+    执行或取消待确认文件操作，防止误删误改。
+    """
+    payload = PENDING_FILE_OPERATIONS.pop(operation_id, None)
+    if not payload:
+        return f"未找到待确认操作：{operation_id}"
+
+    if not confirm:
+        return f"已取消操作：{operation_id}"
+
+    target = Path(payload["target"]).expanduser().resolve()
+    if not _is_within_safe_root(target):
+        return f"拒绝执行：目标超出安全目录 {SAFE_ROOT}"
+
+    if payload["operation"] == "delete":
+        target.unlink(missing_ok=False)
+        return f"已删除文件：{target}"
+
+    target.write_text(payload["new_content"], encoding="utf-8")
+    return f"已更新文件：{target}（UTF-8 覆盖写入）"
+
+
+@mcp.tool()
+def get_pending_operations() -> str:
+    """查看尚未确认的文件操作。"""
+    if not PENDING_FILE_OPERATIONS:
+        return "当前没有待确认文件操作。"
+
+    lines = [f"待确认操作数量: {len(PENDING_FILE_OPERATIONS)}"]
+    for op_id, payload in PENDING_FILE_OPERATIONS.items():
+        lines.append(f"- {op_id} | {payload['operation']} | {payload['target']}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def analyze_time_series(values: list[float], horizon: int = 3) -> str:
+    """
+    时间序列快速分析：给出均值、趋势与线性外推预测。
+    """
+    if not values or len(values) < 3:
+        return "请至少提供 3 个数值。"
+    horizon = max(1, min(30, int(horizon)))
+    n = len(values)
+    avg = sum(values) / n
+    trend = (values[-1] - values[0]) / (n - 1)
+    forecast = [round(values[-1] + trend * (i + 1), 4) for i in range(horizon)]
+    return (
+        f"样本数: {n}\n均值: {avg:.4f}\n"
+        f"线性趋势(每步): {trend:.4f}\n"
+        f"未来 {horizon} 步预测: {forecast}"
+    )
+
+
+def _resolve_feishu_robot_url(robot_name: str = "default") -> str:
+    normalized = (robot_name or "default").strip().upper().replace("-", "_")
+    if normalized == "DEFAULT":
+        return os.getenv("FEISHU_ROBOT_URL", "").strip() or os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+    return (
+            os.getenv(f"FEISHU_ROBOT_{normalized}_URL", "").strip()
+            or os.getenv("FEISHU_ROBOT_URL", "").strip()
+            or os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+    )
+
+
+async def _send_feishu_message(message: str) -> str:
+    if not message.strip():
+        return "message 不能为空。"
+    robot_url = os.getenv("FEISHU_WEBHOOK_URL");
+
+    payload = {"msg_type": "text", "content": {"text": message}}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(robot_url, json=payload)
+            return f"飞书机器人发送完成，HTTP {resp.status_code}。"
+    except Exception as exc:
+        return f"飞书机器人发送失败: {exc}"
+
+
+@mcp.tool()
+async def send_feishu_robot_message(message: str) -> str:
+    """
+    使用飞书机器人发送消息。
+    :param message: 要发送的文本
+    """
+    return await _send_feishu_message(message=message)
+
+
+@mcp.tool()
+def summarize_local_capabilities() -> str:
+    """
+    返回当前可用于本地自动化的能力说明，便于多工具编排。
+    """
+    return (
+        "当前本地自动化能力：\n"
+        "1) 文件系统：查找/读取/列举/待确认修改删除。\n"
+        "2) 本地应用：按命令启动应用（可用于拉起 QQ、飞书、浏览器）。\n"
+        "3) 通知消息：支持飞书机器人发送。\n"
+        "4) 桌面 IM：支持自动粘贴并发送消息（依赖 pyautogui + pyperclip）。\n"
+        "5) 文档处理：可创建 Word 文件并导出。\n"
+        "6) 时间序列：基础统计与趋势预测。"
+    )
+
+
+@mcp.tool()
+def send_desktop_message(
+        app_command: str,
+        message: str,
+        press_enter: bool = True,
+        warmup_seconds: float = 1.5,
+) -> str:
+    """
+    桌面 IM 自动发送消息（QQ/飞书/企业微信等）。
+    说明：依赖 pyautogui + pyperclip，且需要桌面会话可交互。
+    """
+    if not app_command.strip():
+        return "请提供 app_command（如 qq / feishu / wechat）。"
+    if not message.strip():
+        return "请提供 message 文本。"
+
+    try:
+        import pyautogui
+        import pyperclip
+    except Exception:
+        return "缺少依赖：请安装 pyautogui 与 pyperclip 后重试。"
+
+    launch = open_local_application(app_command, "")
+    pyperclip.copy(message)
+    time.sleep(max(0.5, min(warmup_seconds, 10.0)))
+
+    if platform.system().lower() == "darwin":
+        pyautogui.hotkey("command", "v")
+    else:
+        pyautogui.hotkey("ctrl", "v")
+    if press_enter:
+        pyautogui.press("enter")
+
+    return f"{launch}\n已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
+
+
+def _detect_channel_from_request(request: str) -> str:
+    text = (request or "").lower()
+    if any(k in text for k in ["飞书", "feishu", "lark"]):
+        return "feishu"
+    if any(k in text for k in ["qq", "企鹅"]):
+        return "qq"
+    if any(k in text for k in ["facebook", "messenger", "meta"]):
+        return "unsupported"
+    return "auto"
+
+
+@mcp.tool()
+async def send_message_by_request(
+        request: str,
+        message: str = "",
+        preferred_channel: str = "auto",
+        qq_app_command: str = "qq",
+        auto_send: bool = True,
+) -> str:
+    """
+    根据请求自动选择飞书或 QQ 发送消息。
+    - 飞书：调用飞书机器人发送
+    - QQ：调用桌面自动发送
+    """
+    channel = preferred_channel.strip().lower()
+    if channel == "auto":
+        channel = _detect_channel_from_request(request)
+    final_message = message.strip() or request.strip()
+    if not final_message:
+        return "消息内容为空，请提供 request 或 message。"
+
+    if channel == "unsupported":
+        return "检测到目标为 Facebook/Messenger，当前仅支持飞书机器人与 QQ 桌面发送。"
+
+    if channel in {"feishu", "lark"}:
+        return await send_feishu_robot_message(message=final_message)
+    if channel == "qq":
+        return send_desktop_message(
+            app_command=qq_app_command,
+            message=final_message,
+            press_enter=auto_send,
+        )
+
+    return (
+        "未识别发送渠道。请在请求中明确写“飞书”或“QQ”，"
+        "或传 preferred_channel='feishu' / 'qq'。"
+    )
 
 
 

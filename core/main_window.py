@@ -8,7 +8,7 @@ import tempfile
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout,
     QTextEdit, QPushButton, QHBoxLayout, QScrollArea, QFileDialog,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QIcon
@@ -38,7 +38,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         """初始化UI"""
-        self.setWindowTitle("智能助手")
+        self.setWindowTitle("MAI Copilot")
         self.setMinimumSize(920, 640)
         self.resize(1080, 760)
 
@@ -46,7 +46,6 @@ class MainWindow(QMainWindow):
             QMainWindow { background: #f4f6fb; }
             QWidget { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; color: #263238; }
             QFrame#Card { background: #ffffff; border: 1px solid #e7ebf3; border-radius: 16px; }
-            QLabel#TitleLabel { font-size: 28px; font-weight: 700; color: #1f2d3d; }
             QTextEdit { background: #ffffff; border: 1px solid #d6dce8; border-radius: 12px; padding: 10px; font-size: 14px; selection-background-color: #d6e7ff; }
             QTextEdit:focus { border: 2px solid #5b8def; }
             QPushButton { border: none; border-radius: 14px; padding: 8px 12px; font-size: 13px; font-weight: 600; }
@@ -69,21 +68,6 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(22, 18, 22, 18)
         main_layout.setSpacing(14)
 
-        title_card = QFrame()
-        title_card.setObjectName("Card")
-        title_layout = QVBoxLayout(title_card)
-        title_layout.setContentsMargins(20, 16, 20, 16)
-        title_layout.setSpacing(4)
-
-        title_label = QLabel("🤖 LangChain 风格智能助手")
-        title_label.setObjectName("TitleLabel")
-        subtitle_label = QLabel("支持 Agent 工具调用、文件上下文与本地持久化记忆")
-        subtitle_label.setStyleSheet("font-size: 13px; color: #6b7280;")
-
-        title_layout.addWidget(title_label)
-        title_layout.addWidget(subtitle_label)
-        main_layout.addWidget(title_card)
-
         history_card = QFrame()
         history_card.setObjectName("Card")
         history_card_layout = QVBoxLayout(history_card)
@@ -105,7 +89,7 @@ class MainWindow(QMainWindow):
 
         self.scroll_area.setWidget(self.history_container)
         history_card_layout.addWidget(self.scroll_area, 1)
-        main_layout.addWidget(history_card, 5)
+        main_layout.addWidget(history_card, 6)
 
         input_card = QFrame()
         input_card.setObjectName("Card")
@@ -159,7 +143,7 @@ class MainWindow(QMainWindow):
 
         button_layout.addStretch()
 
-        clear_memory_button = QPushButton("清空记忆")
+        clear_memory_button = QPushButton("重置记忆")
         clear_memory_button.setObjectName("AssistButton")
         clear_memory_button.setToolTip("删除文件中的上下文记忆，并清空当前显示历史")
         clear_memory_button.clicked.connect(self.clear_conversation_memory)
@@ -223,12 +207,32 @@ class MainWindow(QMainWindow):
         self.add_to_history(result, role="ai")
 
     def clear_input(self):
+        if self.text_input.toPlainText().strip() or self.selected_file_path:
+            reply = QMessageBox.question(
+                self,
+                "确认清空",
+                "确定要清空当前输入与文件选择吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+                )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         self.text_input.clear()
         self.selected_file_path = ""
         self.file_path_label.setText("未选择文件")
         self.status_label.setText("输入内容与文件选择已清空")
 
     def clear_conversation_memory(self):
+        reply = QMessageBox.warning(
+            self,
+            "确认重置记忆",
+            "这会清空对话历史与本地记忆文件，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+            )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.status_label.setText("已取消重置记忆")
+            return
         self.mcpClient.clear_memory()
         self.clear_history()
         self.status_label.setText("文件记忆与当前会话展示均已清空")
@@ -351,9 +355,9 @@ class MainWindow(QMainWindow):
                 "background: #e8eeff; border: 1px solid #d2ddff; border-radius: 10px;"
             )
             bubble.setStyleSheet(
-                "QFrame {background-color: #4f7df3; border: 1px solid #4a74df; border-radius: 14px;}"
+                "QFrame {background-color: #3f72ff; border: 1px solid #3568f2; border-radius: 16px;}"
             )
-            content_label.setStyleSheet("color: white; font-size: 14px; line-height: 1.5;")
+            content_label.setStyleSheet("color: white; font-size: 14px; line-height: 1.6;")
             row_layout.addStretch()
             row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignRight)
             row_layout.addWidget(sender)
@@ -363,9 +367,9 @@ class MainWindow(QMainWindow):
                 "background: #f0f3f8; border: 1px solid #e0e6f0; border-radius: 10px;"
             )
             bubble.setStyleSheet(
-                "QFrame {background-color: #ffffff; border: 1px solid #d9e2f0; border-radius: 14px;}"
+                "QFrame {background-color: #f8fbff; border: 1px solid #d8e4f5; border-radius: 16px;}"
             )
-            content_label.setStyleSheet("color: #263238; font-size: 14px; line-height: 1.5;")
+            content_label.setStyleSheet("color: #263238; font-size: 14px; line-height: 1.6;")
             row_layout.addWidget(sender)
             row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignLeft)
             row_layout.addStretch()
