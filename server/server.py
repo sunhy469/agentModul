@@ -29,6 +29,7 @@ BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
 SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
 PENDING_FILE_OPERATIONS: dict[str, dict[str, Any]] = {}
+FEISHU_TOKEN_CACHE: dict[str, Any] = {"token": "", "expire_at": 0.0}
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -590,6 +591,12 @@ def _resolve_feishu_robot_url(robot_name: str = "default") -> str:
 
 
 async def _get_feishu_tenant_access_token() -> tuple[str, str]:
+    now = time.time()
+    cached_token = str(FEISHU_TOKEN_CACHE.get("token", "")).strip()
+    cached_expire_at = float(FEISHU_TOKEN_CACHE.get("expire_at", 0.0))
+    if cached_token and now < (cached_expire_at - 60):
+        return cached_token, ""
+
     app_id = os.getenv("FEISHU_APP_ID", "").strip()
     app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
     if not app_id or not app_secret:
@@ -615,6 +622,10 @@ async def _get_feishu_tenant_access_token() -> tuple[str, str]:
     token = data.get("tenant_access_token", "")
     if not token:
         return "", "获取 tenant_access_token 成功但响应中无 tenant_access_token。"
+
+    expires_in = int(data.get("expire", 7200) or 7200)
+    FEISHU_TOKEN_CACHE["token"] = token
+    FEISHU_TOKEN_CACHE["expire_at"] = now + max(60, expires_in)
     return token, ""
 
 
@@ -645,13 +656,15 @@ def _resolve_image_file(image_path: str) -> Path | None:
         if c.exists() and c.is_file():
             return c.resolve()
 
-    # 最后在 SAFE_ROOT 下按文件名检索
-    try:
-        for fp in SAFE_ROOT.rglob(base_name):
-            if fp.is_file():
-                return fp.resolve()
-    except Exception:
-        return None
+    # 深度检索在大目录（如 D:\）会很慢，默认关闭；需要时可显式开启。
+    deep_search = os.getenv("ENABLE_DEEP_IMAGE_SEARCH", "0").strip().lower() in {"1", "true", "yes"}
+    if deep_search:
+        try:
+            for fp in SAFE_ROOT.rglob(base_name):
+                if fp.is_file():
+                    return fp.resolve()
+        except Exception:
+            return None
     return None
 
 
