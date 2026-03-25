@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -395,6 +396,23 @@ def _open_with_default_app(target: Path) -> None:
         subprocess.Popen(["open", str(target)])
     else:
         subprocess.Popen(["xdg-open", str(target)])
+
+
+def _is_windows_process_running(process_names: list[str]) -> bool:
+    if platform.system().lower() != "windows":
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        output = (result.stdout or "").lower()
+        return any(name.lower() in output for name in process_names)
+    except Exception:
+        return False
 
 
 @mcp.tool()
@@ -803,6 +821,8 @@ def send_desktop_message(
         press_enter: bool = True,
         warmup_seconds: float = 1.5,
         focus_input_click: bool = True,
+        conversation_name: str = "",
+        relaunch_if_running: bool = False,
 ) -> str:
     """
     桌面 IM 自动发送消息（QQ/飞书/企业微信等）。
@@ -819,9 +839,29 @@ def send_desktop_message(
     except Exception:
         return "缺少依赖：请安装 pyautogui 与 pyperclip 后重试。"
 
-    launch = open_local_application(app_command, "")
+    running = _is_windows_process_running(["QQ.exe", "QQNT.exe", "QQScLauncher.exe"]) if app_command.lower() == "qq" else False
+    if running and not relaunch_if_running:
+        launch = "检测到 QQ 已在运行，跳过重复启动。"
+    else:
+        launch = open_local_application(app_command, "")
     pyperclip.copy(message)
     time.sleep(max(0.5, min(warmup_seconds, 10.0)))
+
+    # 若提供会话名，先在 IM 中搜索并进入对应会话
+    if conversation_name.strip():
+        pyperclip.copy(conversation_name.strip())
+        if platform.system().lower() == "darwin":
+            pyautogui.hotkey("command", "f")
+            time.sleep(0.1)
+            pyautogui.hotkey("command", "v")
+        else:
+            pyautogui.hotkey("ctrl", "f")
+            time.sleep(0.1)
+            pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.2)
+        pyautogui.press("enter")
+        time.sleep(0.4)
+        pyperclip.copy(message)
 
     # 尝试将焦点切到聊天输入框（对 QQ/飞书等桌面 IM 更稳定）
     if focus_input_click:
@@ -862,6 +902,20 @@ def _detect_channel_from_request(request: str) -> str:
     return "auto"
 
 
+def _extract_qq_target_and_message(request: str, fallback_message: str = "") -> tuple[str, str]:
+    text = (request or "").strip()
+    if not text:
+        return "", fallback_message.strip()
+
+    # 例：在qq找一下bamboo这个人，和他说，让他明天下午来找我
+    m = re.search(r"(?:找(?:一下)?)([^，。,.\s]+)(?:这个人)?(?:，|,)?(?:和他说|并?告诉他|对他说|说)[:：，,]?(.*)", text)
+    if m:
+        name = (m.group(1) or "").strip()
+        content = (m.group(2) or "").strip() or fallback_message.strip()
+        return name, content
+    return "", fallback_message.strip() or text
+
+
 @mcp.tool()
 async def send_message_by_request(
         request: str,
@@ -888,10 +942,12 @@ async def send_message_by_request(
     if channel in {"feishu", "lark"}:
         return await send_feishu_robot_message(message=final_message)
     if channel == "qq":
+        target_name, qq_message = _extract_qq_target_and_message(request, fallback_message=message.strip() or final_message)
         return send_desktop_message(
             app_command=qq_app_command,
-            message=final_message,
+            message=qq_message or final_message,
             press_enter=auto_send,
+            conversation_name=target_name,
         )
 
     return (
