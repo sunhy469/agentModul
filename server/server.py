@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Any
 
 import httpx
@@ -619,20 +620,26 @@ async def _get_feishu_tenant_access_token() -> tuple[str, str]:
 
 def _resolve_image_file(image_path: str) -> Path | None:
     """尽量把“图片名”解析为可读取的本地文件路径。"""
-    raw = (image_path or "").strip()
+    raw = (image_path or "").strip().strip('"').strip("'")
     if not raw:
         return None
 
-    p = Path(raw).expanduser()
-    if p.exists() and p.is_file():
-        return p.resolve()
+    # 先尝试输入本身（支持绝对路径）
+    direct_candidates = [raw]
+    if "\\" in raw:
+        direct_candidates.append(raw.replace("\\", "/"))
+    for item in direct_candidates:
+        p = Path(item).expanduser()
+        if p.exists() and p.is_file():
+            return p.resolve()
 
-    # 若只传了文件名，则尝试常见目录
-    base_name = Path(raw).name
+    # 若只传了文件名或 Windows 风格路径，统一提取文件名
+    base_name = PureWindowsPath(raw).name if ("\\" in raw or ":" in raw) else Path(raw).name
     candidates = [
         Path.cwd() / base_name,
         Path(BASE_DIR) / base_name,
         Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).expanduser().resolve() / base_name,
+        Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve() / base_name,
     ]
     for c in candidates:
         if c.exists() and c.is_file():
