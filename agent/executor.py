@@ -26,10 +26,11 @@ class LangChainStyleAgentExecutor:
 
     def _build_system_prompt(self) -> str:
         return (
-            "你是一个采用 LangChain Agent 模式组织的智能助手。"
+            "你是一个采用 ReAct 与状态机协同的智能体系统。"
             "你的工作流必须遵循 Thought -> Action -> Observation -> Final Answer。"
+            "你需要为每个任务维护状态：pending / in_progress / completed / failed。"
             "当问题可直接回答时，直接给出结论；当需要工具时，主动调用工具。"
-            "回答请保持结构化，优先中文，并结合历史记忆理解上下文。"
+            "回答请保持结构化，优先中文，并结合压缩记忆和当前上下文共同推理。"
         )
 
     def _compose_user_message(self, query: str, attachment_context: str = "") -> str:
@@ -71,7 +72,9 @@ class LangChainStyleAgentExecutor:
         available_tools = await self.tool_registry.format_openai_tools(allow_browser_search)
 
         try:
+            task_status = "pending"
             for _ in range(self.max_iterations):
+                task_status = "in_progress"
                 response = self.openai_client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -82,6 +85,7 @@ class LangChainStyleAgentExecutor:
                 choice = response.choices[0]
                 if choice.finish_reason != "tool_calls":
                     final_answer = choice.message.content or "模型未返回内容。"
+                    task_status = "completed"
                     self.memory.save_turn(user_message, final_answer, metadata=metadata)
                     return final_answer
 
@@ -110,7 +114,17 @@ class LangChainStyleAgentExecutor:
                         )
                         continue
 
-                    tool_text = await self.tool_registry.call_tool(tool_name, tool_args)
+                    try:
+                        tool_text = await self.tool_registry.call_tool(tool_name, tool_args)
+                    except Exception as tool_exc:
+                        # 对短暂失败做一次轻量重试
+                        retry_payload = dict(tool_args)
+                        retry_payload["_retry"] = True
+                        try:
+                            tool_text = await self.tool_registry.call_tool(tool_name, retry_payload)
+                        except Exception:
+                            task_status = "failed"
+                            tool_text = f"工具调用失败: {tool_exc}"
                     messages.append(
                         {
                             "role": "tool",
@@ -120,7 +134,13 @@ class LangChainStyleAgentExecutor:
                     )
 
             fallback = "已达到最大工具调用轮次，请缩小问题范围后再试。"
-            self.memory.save_turn(user_message, fallback, metadata=metadata)
+            if task_status != "completed":
+                task_status = "failed"
+            self.memory.save_turn(
+                user_message,
+                f"{fallback}\n任务状态: {task_status}",
+                metadata=metadata,
+            )
             return fallback
         except Exception as exc:
             return f"处理查询时出错 {exc}"

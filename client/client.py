@@ -27,13 +27,13 @@ class MCPClient:
         self.exit_stack = AsyncExitStack()
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("OPENAI_BASE_URL")
-        self.model = os.getenv("MODEL") or "gpt-4o"
+        self.model = os.getenv("MODEL") or "gpt-5.4-nano"
 
         if not self.openai_api_key:
             print("⚠️ 未找到 API Key, 使用模拟模式")
             self.openai_api_key = "dummy-key"
             self.base_url = self.base_url or "http://localhost:8080"
-            self.model = "gpt-4o"
+            self.model = "gpt-5.4-nano"
 
         http_client_kwargs = {
             "timeout": 60.0,
@@ -57,7 +57,12 @@ class MCPClient:
             "AGENT_MEMORY_FILE",
             os.path.join(os.getcwd(), "generated_files", "conversation_memory.json"),
         )
-        self.memory = FileConversationMemory(memory_file=memory_file, max_messages=12)
+        self.memory = FileConversationMemory(
+            memory_file=memory_file,
+            max_messages=12,
+            compress_trigger_messages=20,
+            summary_max_chars=1400,
+        )
         self.agent_executor: Optional[LangChainStyleAgentExecutor] = None
 
     async def _connect_stdio_server(self, name: str, command: str, args: list[str]) -> list[Any]:

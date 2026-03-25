@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ USER_AGENT = "weather-app/1.0"
 BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
 SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
+PENDING_FILE_OPERATIONS: dict[str, dict[str, Any]] = {}
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -182,6 +184,17 @@ def _is_within_safe_root(target: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _ensure_safe_target(file_path: str) -> tuple[Path | None, str]:
+    if not file_path.strip():
+        return None, "请提供文件路径。"
+    target = Path(file_path).expanduser().resolve()
+    if not target.exists() or not target.is_file():
+        return None, f"文件不存在：{target}"
+    if not _is_within_safe_root(target):
+        return None, f"拒绝访问：目标超出安全目录 {SAFE_ROOT}"
+    return target, ""
 
 
 def _find_file_by_keyword(filename: str, directory: str = "") -> tuple[Path | None, str]:
@@ -468,6 +481,98 @@ def list_local_files(directory: str = "", keyword: str = "", limit: int = 20) ->
         return "\n".join(lines)
     except Exception as e:
         return f"列出文件失败: {e}"
+
+
+@mcp.tool()
+def create_pending_file_operation(
+    operation: str,
+    file_path: str,
+    new_content: str = "",
+    reason: str = "",
+) -> str:
+    """
+    创建待确认文件操作（delete/modify），用于双重安全确认。
+    """
+    op = operation.strip().lower()
+    if op not in {"delete", "modify"}:
+        return "operation 仅支持 delete 或 modify。"
+
+    target, err = _ensure_safe_target(file_path)
+    if err:
+        return err
+
+    if op == "modify" and not new_content.strip():
+        return "modify 操作必须提供 new_content。"
+
+    operation_id = uuid.uuid4().hex[:12]
+    PENDING_FILE_OPERATIONS[operation_id] = {
+        "operation": op,
+        "target": str(target),
+        "new_content": new_content,
+        "reason": reason.strip(),
+        "created_at": time.time(),
+    }
+    return (
+        f"已创建待确认操作，operation_id={operation_id}\n"
+        f"类型: {op}\n目标: {target}\n"
+        "请调用 confirm_file_operation(operation_id, confirm=True) 执行；"
+        "若取消请传 confirm=False。"
+    )
+
+
+@mcp.tool()
+def confirm_file_operation(operation_id: str, confirm: bool) -> str:
+    """
+    执行或取消待确认文件操作，防止误删误改。
+    """
+    payload = PENDING_FILE_OPERATIONS.pop(operation_id, None)
+    if not payload:
+        return f"未找到待确认操作：{operation_id}"
+
+    if not confirm:
+        return f"已取消操作：{operation_id}"
+
+    target = Path(payload["target"]).expanduser().resolve()
+    if not _is_within_safe_root(target):
+        return f"拒绝执行：目标超出安全目录 {SAFE_ROOT}"
+
+    if payload["operation"] == "delete":
+        target.unlink(missing_ok=False)
+        return f"已删除文件：{target}"
+
+    target.write_text(payload["new_content"], encoding="utf-8")
+    return f"已更新文件：{target}（UTF-8 覆盖写入）"
+
+
+@mcp.tool()
+def get_pending_operations() -> str:
+    """查看尚未确认的文件操作。"""
+    if not PENDING_FILE_OPERATIONS:
+        return "当前没有待确认文件操作。"
+
+    lines = [f"待确认操作数量: {len(PENDING_FILE_OPERATIONS)}"]
+    for op_id, payload in PENDING_FILE_OPERATIONS.items():
+        lines.append(f"- {op_id} | {payload['operation']} | {payload['target']}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def analyze_time_series(values: list[float], horizon: int = 3) -> str:
+    """
+    时间序列快速分析：给出均值、趋势与线性外推预测。
+    """
+    if not values or len(values) < 3:
+        return "请至少提供 3 个数值。"
+    horizon = max(1, min(30, int(horizon)))
+    n = len(values)
+    avg = sum(values) / n
+    trend = (values[-1] - values[0]) / (n - 1)
+    forecast = [round(values[-1] + trend * (i + 1), 4) for i in range(horizon)]
+    return (
+        f"样本数: {n}\n均值: {avg:.4f}\n"
+        f"线性趋势(每步): {trend:.4f}\n"
+        f"未来 {horizon} 步预测: {forecast}"
+    )
 
 
 
