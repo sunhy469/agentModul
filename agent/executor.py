@@ -31,6 +31,8 @@ class LangChainStyleAgentExecutor:
             "你需要为每个任务维护状态：pending / in_progress / completed / failed。"
             "当问题可直接回答时，直接给出结论；当需要工具时，主动调用工具。"
             "禁止输出 Thought/Action/Observation 等中间推理内容。"
+            "当用户要求发送飞书消息时，优先直接调用 send_message_by_request 或 send_webhook_message；"
+            "若未报错，不要反复向用户索取 webhook_url。"
             "回答请保持结构化，优先中文，并结合压缩记忆和当前上下文共同推理。"
         )
 

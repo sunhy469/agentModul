@@ -11,10 +11,12 @@ from typing import Any
 
 import httpx
 from docx import Document
+from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 # 初始化 MCP 服务器
 mcp = FastMCP("WeatherServer")
+load_dotenv()
 
 # OpenWeather API 配置
 OPENWEATHER_API_BASE = "https://api.openweathermap.org/data/2.5/weather"
@@ -593,7 +595,7 @@ async def send_webhook_message(
         resolved_webhook = os.getenv("DEFAULT_WEBHOOK_URL", "").strip()
     if not resolved_webhook.startswith("http"):
         return (
-            "webhook_url 无效。请配置环境变量 FEISHU_WEBHOOK_URL / DEFAULT_WEBHOOK_URL。"
+            "webhook_url 未配置或无效。请在 MCP server 进程环境中配置 FEISHU_WEBHOOK_URL / DEFAULT_WEBHOOK_URL。"
         )
 
     if provider_key in {"feishu", "lark"}:
