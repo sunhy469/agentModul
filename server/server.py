@@ -1,7 +1,6 @@
 import json
 import os
 import platform
-import re
 import shlex
 import shutil
 import subprocess
@@ -579,7 +578,6 @@ def analyze_time_series(values: list[float], horizon: int = 3) -> str:
 @mcp.tool()
 async def send_webhook_message(
     text: str,
-    webhook_url: str = "",
     provider: str = "generic",
 ) -> str:
     """
@@ -589,16 +587,13 @@ async def send_webhook_message(
         return "text 不能为空。"
 
     provider_key = provider.strip().lower()
-    resolved_webhook = webhook_url.strip()
-    if not resolved_webhook:
-        if provider_key in {"feishu", "lark"}:
-            resolved_webhook = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
-        else:
-            resolved_webhook = os.getenv("DEFAULT_WEBHOOK_URL", "").strip()
+    if provider_key in {"feishu", "lark"}:
+        resolved_webhook = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+    else:
+        resolved_webhook = os.getenv("DEFAULT_WEBHOOK_URL", "").strip()
     if not resolved_webhook.startswith("http"):
         return (
-            "webhook_url 无效。请在参数传入 webhook_url，"
-            "或配置环境变量 FEISHU_WEBHOOK_URL / DEFAULT_WEBHOOK_URL。"
+            "webhook_url 无效。请配置环境变量 FEISHU_WEBHOOK_URL / DEFAULT_WEBHOOK_URL。"
         )
 
     if provider_key in {"feishu", "lark"}:
@@ -679,25 +674,6 @@ def _detect_channel_from_request(request: str) -> str:
     return "auto"
 
 
-def _extract_message_from_request(request: str) -> str:
-    text = (request or "").strip()
-    if not text:
-        return ""
-    quoted = re.findall(r"[\"“”']([^\"“”']+)[\"“”']", text)
-    if quoted:
-        return quoted[-1].strip()
-
-    patterns = [
-        r"(?:发送|发|send)\s*(.+?)\s*(?:到|给).*(?:飞书|lark|qq)",
-        r"(?:在|往).*(?:飞书|lark|qq).*(?:发送|发)\s*(.+)",
-    ]
-    for pattern in patterns:
-        matched = re.search(pattern, text, re.IGNORECASE)
-        if matched:
-            return matched.group(1).strip("：: ，,。.!！")
-    return text
-
-
 @mcp.tool()
 async def send_message_by_request(
     request: str,
@@ -705,7 +681,6 @@ async def send_message_by_request(
     preferred_channel: str = "auto",
     qq_app_command: str = "qq",
     auto_send: bool = True,
-    webhook_url: str = "",
 ) -> str:
     """
     根据请求自动选择飞书或 QQ 发送消息。
@@ -715,13 +690,12 @@ async def send_message_by_request(
     channel = preferred_channel.strip().lower()
     if channel == "auto":
         channel = _detect_channel_from_request(request)
-    final_message = message.strip() or _extract_message_from_request(request)
+    final_message = message.strip() or request.strip()
     if not final_message:
         return "消息内容为空，请提供 request 或 message。"
 
     if channel in {"feishu", "lark"}:
         return await send_webhook_message(
-            webhook_url=webhook_url,
             text=final_message,
             provider="feishu",
         )
@@ -734,7 +708,6 @@ async def send_message_by_request(
 
     if os.getenv("FEISHU_WEBHOOK_URL", "").strip():
         return await send_webhook_message(
-            webhook_url=webhook_url,
             text=final_message,
             provider="feishu",
         )
