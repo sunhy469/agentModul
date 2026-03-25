@@ -112,6 +112,23 @@ class MCPClient:
             except Exception as e:
                 print(f"\n⚠️ Browser MCP 启动失败，已降级为仅本地工具: {e}")
 
+        windows_enabled = os.getenv("ENABLE_WINDOWS_MCP", "0").strip().lower() in {"1", "true", "yes"}
+        if windows_enabled:
+            windows_cmd = os.getenv("WINDOWS_MCP_COMMAND", "npx")
+            raw_args = os.getenv("WINDOWS_MCP_ARGS", "")
+            if not raw_args.strip():
+                print("\n⚠️ ENABLE_WINDOWS_MCP 已开启，但未配置 WINDOWS_MCP_ARGS，跳过接入。")
+            else:
+                windows_args = shlex.split(raw_args)
+                try:
+                    windows_tools = await self._connect_stdio_server("windows", windows_cmd, windows_args)
+                    for tool in windows_tools:
+                        self.tool_to_session[tool.name] = self.sessions["windows"]
+                        all_tools.append(tool)
+                    print("\n已接入 Windows MCP，新增工具:", [tool.name for tool in windows_tools])
+                except Exception as e:
+                    print(f"\n⚠️ Windows MCP 启动失败，已降级为仅现有工具: {e}")
+
         self.tool_registry = MCPToolRegistry(
             sessions=self.sessions,
             tool_to_session=self.tool_to_session,
