@@ -30,6 +30,7 @@ class LangChainStyleAgentExecutor:
             "你的工作流必须遵循 Thought -> Action -> Observation -> Final Answer。"
             "你需要为每个任务维护状态：pending / in_progress / completed / failed。"
             "当问题可直接回答时，直接给出结论；当需要工具时，主动调用工具。"
+            "禁止输出 Thought/Action/Observation 等中间推理内容。"
             "回答请保持结构化，优先中文，并结合压缩记忆和当前上下文共同推理。"
         )
 
@@ -38,6 +39,13 @@ class LangChainStyleAgentExecutor:
         if isinstance(message, str):
             return message
         return json.dumps(message, ensure_ascii=False)
+
+    @staticmethod
+    def _is_simple_greeting(query: str, has_attachment: bool) -> bool:
+        if has_attachment:
+            return False
+        text = (query or "").strip().lower()
+        return text in {"hi", "hello", "你好", "嗨", "在吗", "在么", "早上好", "晚上好"}
 
     def _compose_user_message(self, query: str, attachment_context: Any = "") -> str | list[dict[str, Any]]:
         parts: list[str] = []
@@ -60,13 +68,18 @@ class LangChainStyleAgentExecutor:
             return "请输入问题或上传文件后再发送。"
 
         plain_query = query or ""
+        if self._is_simple_greeting(plain_query, isinstance(attachment_context, list) and len(attachment_context) > 0):
+            direct = "你好呀！我在的～你可以直接告诉我想完成的任务。"
+            self.memory.save_turn(self._serialize_for_memory(user_message), direct, metadata=metadata)
+            return direct
+
         allow_browser_search = self.tool_registry.is_browser_search_explicit(plain_query)
         require_browser_tools = self.tool_registry.is_browser_task(plain_query)
         has_explicit_url = bool(self.tool_registry.extract_urls(plain_query))
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._build_system_prompt()},
-            *self.memory.build_context_messages(),
+            *self.memory.build_context_messages(query=plain_query),
             {"role": "user", "content": user_message},
         ]
 

@@ -56,7 +56,7 @@ class MCPClient:
 
         memory_file = os.getenv(
             "AGENT_MEMORY_FILE",
-            os.path.join(os.getcwd(), "generated_files", "conversation_memory.json"),
+            os.path.join(os.getcwd(), "generated_files", "conversation_memory.db"),
         )
         self.memory = FileConversationMemory(
             memory_file=memory_file,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Iterable
 
@@ -22,30 +23,80 @@ class FileConversationMemory:
         self.compress_trigger_messages = max(8, compress_trigger_messages)
         self.summary_max_chars = max(400, summary_max_chars)
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
-        if not self.memory_file.exists():
-            self._write_messages([])
+        self._ensure_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(str(self.memory_file))
+
+    def _ensure_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    timestamp TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
 
     def _read_messages(self) -> list[AgentMessage]:
-        try:
-            payload = json.loads(self.memory_file.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return []
-        return [AgentMessage.from_dict(item) for item in payload.get("messages", [])]
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT role, content, metadata, timestamp FROM messages ORDER BY id ASC"
+            ).fetchall()
+        messages: list[AgentMessage] = []
+        for role, content, metadata_text, timestamp in rows:
+            try:
+                metadata = json.loads(metadata_text or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            messages.append(
+                AgentMessage(
+                    role=role,
+                    content=content,
+                    metadata=metadata,
+                    timestamp=timestamp,
+                )
+            )
+        return messages
 
     def _write_messages(self, messages: Iterable[AgentMessage]) -> None:
-        data = {"messages": [message.to_dict() for message in messages]}
-        self.memory_file.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._connect() as conn:
+            conn.execute("DELETE FROM messages")
+            conn.executemany(
+                "INSERT INTO messages(role, content, metadata, timestamp) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        message.role,
+                        message.content,
+                        json.dumps(message.metadata or {}, ensure_ascii=False),
+                        message.timestamp,
+                    )
+                    for message in messages
+                ],
+            )
+            conn.commit()
 
     def load_messages(self) -> list[AgentMessage]:
         return self._read_messages()
 
     def append(self, role: str, content: str, metadata: dict | None = None) -> None:
-        messages = self._read_messages()
-        messages.append(AgentMessage(role=role, content=content, metadata=metadata or {}))
-        self._write_messages(messages)
+        with self._connect() as conn:
+            payload = AgentMessage(role=role, content=content, metadata=metadata or {})
+            conn.execute(
+                "INSERT INTO messages(role, content, metadata, timestamp) VALUES (?, ?, ?, ?)",
+                (
+                    payload.role,
+                    payload.content,
+                    json.dumps(payload.metadata, ensure_ascii=False),
+                    payload.timestamp,
+                ),
+            )
+            conn.commit()
 
     def save_turn(
         self,
@@ -63,11 +114,19 @@ class FileConversationMemory:
         messages = self._compress_if_needed(messages)
         self._write_messages(messages)
 
-    def build_context_messages(self) -> list[dict[str, str]]:
+    def build_context_messages(self, query: str = "") -> list[dict[str, str]]:
+        if self._is_greeting(query):
+            return []
         messages = self._read_messages()
         if self.max_messages > 0:
             messages = messages[-self.max_messages :]
         return [message.to_openai_message() for message in messages]
+
+    @staticmethod
+    def _is_greeting(query: str) -> bool:
+        text = (query or "").strip().lower()
+        greeting_terms = {"hi", "hello", "你好", "嗨", "在吗", "在么", "早上好", "晚上好"}
+        return text in greeting_terms
 
     def _compress_if_needed(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """

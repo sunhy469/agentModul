@@ -614,10 +614,46 @@ def summarize_local_capabilities() -> str:
         "1) 文件系统：查找/读取/列举/待确认修改删除。\n"
         "2) 本地应用：按命令启动应用（可用于拉起 QQ、飞书、浏览器）。\n"
         "3) 通知消息：支持 webhook 发送（飞书机器人/自定义服务）。\n"
-        "4) 文档处理：可创建 Word 文件并导出。\n"
-        "5) 时间序列：基础统计与趋势预测。\n"
-        "说明：若要实现“自动在 QQ 聊天窗口输入并发送”，建议再接入桌面自动化 MCP（按键/窗口控制）。"
+        "4) 桌面 IM：支持自动粘贴并发送消息（依赖 pyautogui + pyperclip）。\n"
+        "5) 文档处理：可创建 Word 文件并导出。\n"
+        "6) 时间序列：基础统计与趋势预测。"
     )
+
+
+@mcp.tool()
+def send_desktop_message(
+    app_command: str,
+    message: str,
+    press_enter: bool = True,
+    warmup_seconds: float = 1.5,
+) -> str:
+    """
+    桌面 IM 自动发送消息（QQ/飞书/企业微信等）。
+    说明：依赖 pyautogui + pyperclip，且需要桌面会话可交互。
+    """
+    if not app_command.strip():
+        return "请提供 app_command（如 qq / feishu / wechat）。"
+    if not message.strip():
+        return "请提供 message 文本。"
+
+    try:
+        import pyautogui
+        import pyperclip
+    except Exception:
+        return "缺少依赖：请安装 pyautogui 与 pyperclip 后重试。"
+
+    launch = open_local_application(app_command, "")
+    pyperclip.copy(message)
+    time.sleep(max(0.5, min(warmup_seconds, 10.0)))
+
+    if platform.system().lower() == "darwin":
+        pyautogui.hotkey("command", "v")
+    else:
+        pyautogui.hotkey("ctrl", "v")
+    if press_enter:
+        pyautogui.press("enter")
+
+    return f"{launch}\n已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
 
 
 
