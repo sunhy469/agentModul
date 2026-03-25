@@ -588,27 +588,111 @@ def _resolve_feishu_robot_url(robot_name: str = "default") -> str:
     )
 
 
-async def _send_feishu_message(message: str) -> str:
+async def _upload_feishu_image(image_path: str, tenant_access_token: str) -> tuple[str, str]:
+    if not image_path.strip():
+        return "", "image_path 不能为空。"
+    if not tenant_access_token.strip():
+        return "", "发送图片消息需要提供 tenant_access_token。"
+
+    file_path = Path(image_path).expanduser()
+    if not file_path.exists() or not file_path.is_file():
+        return "", f"图片文件不存在：{file_path}"
+
+    upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
+    headers = {"Authorization": f"Bearer {tenant_access_token.strip()}"}
+    data = {"image_type": "message"}
+
+    try:
+        with file_path.open("rb") as fp:
+            files = {"image": (file_path.name, fp, "application/octet-stream")}
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(upload_url, headers=headers, data=data, files=files)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return "", f"上传图片到飞书失败: {exc}"
+
+    if payload.get("code") != 0:
+        return "", f"上传图片到飞书失败: code={payload.get('code')}, msg={payload.get('msg')}"
+
+    image_key = payload.get("data", {}).get("image_key", "")
+    if not image_key:
+        return "", "上传图片成功但未返回 image_key。"
+    return image_key, ""
+
+
+async def _send_feishu_message(
+        message: str,
+        link_text: str = "",
+        link_href: str = "",
+        image_path: str = "",
+        tenant_access_token: str = "",
+) -> str:
     if not message.strip():
         return "message 不能为空。"
     robot_url = os.getenv("FEISHU_WEBHOOK_URL");
 
-    payload = {"msg_type": "text", "content": {"text": message}}
+    if not robot_url:
+        return "未配置 FEISHU_WEBHOOK_URL。"
+
+    if image_path.strip():
+        image_key, err = await _upload_feishu_image(image_path=image_path, tenant_access_token=tenant_access_token)
+        if err:
+            return err
+        payload: dict[str, Any] = {
+            "msg_type": "image",
+            "content": {"image_key": image_key}
+        }
+    elif link_text.strip() and link_href.strip():
+        nodes: list[dict[str, Any]] = [{"tag": "text", "text": message}]
+        nodes.append({"tag": "a", "text": link_text.strip(), "href": link_href.strip()})
+        payload = {
+            "msg_type": "post",
+            "content": {
+                "post": {
+                    "zh_cn": {
+                        "title": "",
+                        "content": [nodes]
+                    }
+                }
+            },
+        }
+    else:
+        payload = {"msg_type": "text", "content": {"text": message}}
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(robot_url, json=payload)
-            return f"飞书机器人发送完成，HTTP {resp.status_code}。"
+            if resp.is_success:
+                return f"飞书机器人发送完成，HTTP {resp.status_code}。"
+            return f"飞书机器人发送失败，HTTP {resp.status_code}，响应：{resp.text}"
     except Exception as exc:
         return f"飞书机器人发送失败: {exc}"
 
 
 @mcp.tool()
-async def send_feishu_robot_message(message: str) -> str:
+async def send_feishu_robot_message(
+        message: str,
+        link_text: str = "",
+        link_href: str = "",
+        image_path: str = "",
+        tenant_access_token: str = "",
+) -> str:
     """
-    使用飞书机器人发送消息。
-    :param message: 要发送的文本
+    使用飞书机器人发送消息（支持 text、带超链接的 post、image）。
+    :param message: 文本内容（必填）
+    :param link_text: 超链接显示文字（可选）
+    :param link_href: 超链接地址（可选）
+    :param image_path: 本地图片路径（可选，存在时发送 image 消息）
+    :param tenant_access_token: 飞书 tenant_access_token（发送图片时必填）
     """
-    return await _send_feishu_message(message=message)
+    return await _send_feishu_message(
+        message=message,
+        link_text=link_text,
+        link_href=link_href,
+        image_path=image_path,
+        tenant_access_token=tenant_access_token,
+    )
 
 
 @mcp.tool()
