@@ -39,8 +39,35 @@ class LangChainStyleAgentExecutor:
     @staticmethod
     def _serialize_for_memory(message: Any) -> str:
         if isinstance(message, str):
-            return message
-        return json.dumps(message, ensure_ascii=False)
+            return message[:4000]
+        return json.dumps(message, ensure_ascii=False)[:4000]
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 8000) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n...(已截断，原始长度 {len(text)} 字符)"
+
+    def _sanitize_attachment_context(self, payload: Any) -> Any:
+        if not isinstance(payload, list):
+            return payload
+        sanitized: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            new_item: dict[str, Any] = {}
+            for k, v in item.items():
+                if isinstance(v, str):
+                    new_item[k] = self._truncate_text(v, 500)
+                elif isinstance(v, dict):
+                    nested: dict[str, Any] = {}
+                    for nk, nv in v.items():
+                        nested[nk] = self._truncate_text(nv, 500) if isinstance(nv, str) else nv
+                    new_item[k] = nested
+                else:
+                    new_item[k] = v
+            sanitized.append(new_item)
+        return sanitized
 
     @staticmethod
     def _is_simple_greeting(query: str, has_attachment: bool) -> bool:
@@ -50,6 +77,7 @@ class LangChainStyleAgentExecutor:
         return text in {"hi", "hello", "你好", "嗨", "在吗", "在么", "早上好", "晚上好"}
 
     def _compose_user_message(self, query: str, attachment_context: Any = "") -> str | list[dict[str, Any]]:
+        attachment_context = self._sanitize_attachment_context(attachment_context)
         parts: list[str] = []
         if query:
             parts.append(query)
@@ -154,6 +182,7 @@ class LangChainStyleAgentExecutor:
                         except Exception:
                             task_status = "failed"
                             tool_text = f"工具调用失败: {tool_exc}"
+                    tool_text = self._truncate_text(str(tool_text), 8000)
                     messages.append(
                         {
                             "role": "tool",
