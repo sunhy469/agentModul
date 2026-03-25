@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 import uuid
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -617,25 +618,66 @@ async def _get_feishu_tenant_access_token() -> tuple[str, str]:
     return token, ""
 
 
-async def _upload_feishu_image(image_path: str, tenant_access_token: str) -> tuple[str, str]:
-    if not image_path.strip():
-        return "", "image_path 不能为空。"
+def _resolve_image_file(image_path: str) -> Path | None:
+    """尽量把“图片名”解析为可读取的本地文件路径。"""
+    raw = (image_path or "").strip()
+    if not raw:
+        return None
+
+    p = Path(raw).expanduser()
+    if p.exists() and p.is_file():
+        return p.resolve()
+
+    # 若只传了文件名，则尝试常见目录
+    base_name = Path(raw).name
+    candidates = [
+        Path.cwd() / base_name,
+        Path(BASE_DIR) / base_name,
+        Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).expanduser().resolve() / base_name,
+    ]
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c.resolve()
+
+    # 最后在 SAFE_ROOT 下按文件名检索
+    try:
+        for fp in SAFE_ROOT.rglob(base_name):
+            if fp.is_file():
+                return fp.resolve()
+    except Exception:
+        return None
+    return None
+
+
+async def _upload_feishu_image(
+        image_path: str,
+        tenant_access_token: str,
+        image_base64: str = "",
+        image_filename: str = "upload.jpg",
+) -> tuple[str, str]:
+    if not image_path.strip() and not image_base64.strip():
+        return "", "image_path 和 image_base64 不能同时为空。"
     if not tenant_access_token.strip():
         return "", "发送图片消息需要提供 tenant_access_token。"
-
-    file_path = Path(image_path).expanduser()
-    if not file_path.exists() or not file_path.is_file():
-        return "", f"图片文件不存在：{file_path}"
 
     upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
     headers = {"Authorization": f"Bearer {tenant_access_token.strip()}"}
     data = {"image_type": "message"}
 
     try:
-        with file_path.open("rb") as fp:
-            files = {"image": (file_path.name, fp, "application/octet-stream")}
+        if image_base64.strip():
+            binary = base64.b64decode(image_base64)
+            files = {"image": (image_filename or "upload.jpg", binary, "application/octet-stream")}
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(upload_url, headers=headers, data=data, files=files)
+        else:
+            file_path = _resolve_image_file(image_path)
+            if not file_path:
+                return "", f"图片文件不存在或无法定位：{image_path}"
+            with file_path.open("rb") as fp:
+                files = {"image": (file_path.name, fp, "application/octet-stream")}
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(upload_url, headers=headers, data=data, files=files)
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:
@@ -655,6 +697,8 @@ async def _send_feishu_message(
         link_text: str = "",
         link_href: str = "",
         image_path: str = "",
+        image_base64: str = "",
+        image_filename: str = "upload.jpg",
 ) -> str:
     if not message.strip():
         return "message 不能为空。"
@@ -663,12 +707,17 @@ async def _send_feishu_message(
     if not robot_url:
         return "未配置 FEISHU_WEBHOOK_URL。"
 
-    if image_path.strip():
+    if image_path.strip() or image_base64.strip():
         token, token_err = await _get_feishu_tenant_access_token()
         if token_err:
             return token_err
 
-        image_key, err = await _upload_feishu_image(image_path=image_path, tenant_access_token=token)
+        image_key, err = await _upload_feishu_image(
+            image_path=image_path,
+            tenant_access_token=token,
+            image_base64=image_base64,
+            image_filename=image_filename,
+        )
         if err:
             return err
         payload: dict[str, Any] = {
@@ -708,19 +757,25 @@ async def send_feishu_robot_message(
         link_text: str = "",
         link_href: str = "",
         image_path: str = "",
+        image_base64: str = "",
+        image_filename: str = "upload.jpg",
 ) -> str:
     """
     使用飞书机器人发送消息（支持 text、带超链接的 post、image）。
     :param message: 文本内容（必填）
     :param link_text: 超链接显示文字（可选）
     :param link_href: 超链接地址（可选）
-    :param image_path: 本地图片路径（可选，存在时发送 image 消息）
+    :param image_path: 本地图片路径或图片文件名（可选，存在时发送 image 消息）
+    :param image_base64: 图片二进制数据的 base64 字符串（可选）
+    :param image_filename: image_base64 对应的文件名（可选）
     """
     return await _send_feishu_message(
         message=message,
         link_text=link_text,
         link_href=link_href,
         image_path=image_path,
+        image_base64=image_base64,
+        image_filename=image_filename,
     )
 
 
