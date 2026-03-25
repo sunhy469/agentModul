@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Any
 
 import httpx
@@ -28,6 +29,7 @@ BASE_DIR = os.path.join(os.getcwd(), "generated_files")
 os.makedirs(BASE_DIR, exist_ok=True)
 SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
 PENDING_FILE_OPERATIONS: dict[str, dict[str, Any]] = {}
+FEISHU_TOKEN_CACHE: dict[str, Any] = {"token": "", "expire_at": 0.0}
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -588,27 +590,194 @@ def _resolve_feishu_robot_url(robot_name: str = "default") -> str:
     )
 
 
-async def _send_feishu_message(message: str) -> str:
+async def _get_feishu_tenant_access_token() -> tuple[str, str]:
+    now = time.time()
+    cached_token = str(FEISHU_TOKEN_CACHE.get("token", "")).strip()
+    cached_expire_at = float(FEISHU_TOKEN_CACHE.get("expire_at", 0.0))
+    if cached_token and now < (cached_expire_at - 60):
+        return cached_token, ""
+
+    app_id = os.getenv("FEISHU_APP_ID", "").strip()
+    app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        return "", "缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET 环境变量。"
+
+    token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    payload = {
+        "app_id": app_id,
+        "app_secret": app_secret,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(token_url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return "", f"获取 tenant_access_token 失败: {exc}"
+
+    if data.get("code") != 0:
+        return "", f"获取 tenant_access_token 失败: code={data.get('code')}, msg={data.get('msg')}"
+
+    token = data.get("tenant_access_token", "")
+    if not token:
+        return "", "获取 tenant_access_token 成功但响应中无 tenant_access_token。"
+
+    expires_in = int(data.get("expire", 7200) or 7200)
+    FEISHU_TOKEN_CACHE["token"] = token
+    FEISHU_TOKEN_CACHE["expire_at"] = now + max(60, expires_in)
+    return token, ""
+
+
+def _resolve_image_file(image_path: str) -> Path | None:
+    """尽量把“图片名”解析为可读取的本地文件路径。"""
+    raw = (image_path or "").strip().strip('"').strip("'")
+    if not raw:
+        return None
+
+    # 先尝试输入本身（支持绝对路径）
+    direct_candidates = [raw]
+    if "\\" in raw:
+        direct_candidates.append(raw.replace("\\", "/"))
+    for item in direct_candidates:
+        p = Path(item).expanduser()
+        if p.exists() and p.is_file():
+            return p.resolve()
+
+    # 若只传了文件名或 Windows 风格路径，统一提取文件名
+    base_name = PureWindowsPath(raw).name if ("\\" in raw or ":" in raw) else Path(raw).name
+    candidates = [
+        Path.cwd() / base_name,
+        Path(BASE_DIR) / base_name,
+        Path(os.getenv("LOCAL_SEARCH_DIR", BASE_DIR)).expanduser().resolve() / base_name,
+        Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve() / base_name,
+    ]
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c.resolve()
+
+    # 深度检索在大目录（如 D:\）会很慢，默认关闭；需要时可显式开启。
+    deep_search = os.getenv("ENABLE_DEEP_IMAGE_SEARCH", "0").strip().lower() in {"1", "true", "yes"}
+    if deep_search:
+        try:
+            for fp in SAFE_ROOT.rglob(base_name):
+                if fp.is_file():
+                    return fp.resolve()
+        except Exception:
+            return None
+    return None
+
+
+async def _upload_feishu_image(
+        image_path: str,
+        tenant_access_token: str,
+) -> tuple[str, str]:
+    if not image_path.strip():
+        return "", "image_path 不能为空。"
+    if not tenant_access_token.strip():
+        return "", "发送图片消息需要提供 tenant_access_token。"
+
+    upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
+    headers = {"Authorization": f"Bearer {tenant_access_token.strip()}"}
+    data = {"image_type": "message"}
+
+    try:
+        file_path = _resolve_image_file(image_path)
+        if not file_path:
+            return "", f"图片文件不存在或无法定位：{image_path}"
+        with file_path.open("rb") as fp:
+            files = {"image": (file_path.name, fp, "application/octet-stream")}
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(upload_url, headers=headers, data=data, files=files)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return "", f"上传图片到飞书失败: {exc}"
+
+    if payload.get("code") != 0:
+        return "", f"上传图片到飞书失败: code={payload.get('code')}, msg={payload.get('msg')}"
+
+    image_key = payload.get("data", {}).get("image_key", "")
+    if not image_key:
+        return "", "上传图片成功但未返回 image_key。"
+    return image_key, ""
+
+
+async def _send_feishu_message(
+        message: str,
+        link_text: str = "",
+        link_href: str = "",
+        image_path: str = "",
+) -> str:
     if not message.strip():
         return "message 不能为空。"
     robot_url = os.getenv("FEISHU_WEBHOOK_URL");
 
-    payload = {"msg_type": "text", "content": {"text": message}}
+    if not robot_url:
+        return "未配置 FEISHU_WEBHOOK_URL。"
+
+    if image_path.strip():
+        token, token_err = await _get_feishu_tenant_access_token()
+        if token_err:
+            return token_err
+
+        image_key, err = await _upload_feishu_image(
+            image_path=image_path,
+            tenant_access_token=token,
+        )
+        if err:
+            return err
+        payload: dict[str, Any] = {
+            "msg_type": "image",
+            "content": {"image_key": image_key}
+        }
+    elif link_text.strip() and link_href.strip():
+        nodes: list[dict[str, Any]] = [{"tag": "text", "text": message}]
+        nodes.append({"tag": "a", "text": link_text.strip(), "href": link_href.strip()})
+        payload = {
+            "msg_type": "post",
+            "content": {
+                "post": {
+                    "zh_cn": {
+                        "title": "",
+                        "content": [nodes]
+                    }
+                }
+            },
+        }
+    else:
+        payload = {"msg_type": "text", "content": {"text": message}}
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(robot_url, json=payload)
-            return f"飞书机器人发送完成，HTTP {resp.status_code}。"
+            if resp.is_success:
+                return f"飞书机器人发送完成，HTTP {resp.status_code}。"
+            return f"飞书机器人发送失败，HTTP {resp.status_code}，响应：{resp.text}"
     except Exception as exc:
         return f"飞书机器人发送失败: {exc}"
 
 
 @mcp.tool()
-async def send_feishu_robot_message(message: str) -> str:
+async def send_feishu_robot_message(
+        message: str,
+        link_text: str = "",
+        link_href: str = "",
+        image_path: str = "",
+) -> str:
     """
-    使用飞书机器人发送消息。
-    :param message: 要发送的文本
+    使用飞书机器人发送消息（支持 text、带超链接的 post、image）。
+    :param message: 文本内容（必填）
+    :param link_text: 超链接显示文字（可选）
+    :param link_href: 超链接地址（可选）
+    :param image_path: 本地图片路径或图片文件名（可选，存在时发送 image 消息）
     """
-    return await _send_feishu_message(message=message)
+    return await _send_feishu_message(
+        message=message,
+        link_text=link_text,
+        link_href=link_href,
+        image_path=image_path,
+    )
 
 
 @mcp.tool()
