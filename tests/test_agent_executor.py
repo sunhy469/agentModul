@@ -90,6 +90,24 @@ class AgentExecutorTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, "最终答案")
             self.assertEqual(memory.load_messages()[-1].content, "最终答案")
 
+    async def test_multimodal_user_message_saved(self):
+        final_message = SimpleNamespace(content="看到了图片", tool_calls=[])
+        responses = [
+            SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=final_message)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory = FileConversationMemory(Path(tmpdir) / "memory.json")
+            executor = LangChainStyleAgentExecutor(
+                openai_client=FakeOpenAIClient(responses),
+                model="fake-model",
+                tool_registry=FakeToolRegistry(),
+                memory=memory,
+            )
+            attachment = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aaa"}}]
+            result = await executor.run("请描述图片", attachment_context=attachment)
+            self.assertEqual(result, "看到了图片")
+            self.assertIn("image_url", memory.load_messages()[-2].content)
+
 
 if __name__ == "__main__":
     unittest.main()

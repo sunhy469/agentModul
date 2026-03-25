@@ -1,6 +1,7 @@
 import mimetypes
 import os
 import shlex
+import base64
 from contextlib import AsyncExitStack
 from typing import Optional, Any
 
@@ -18,7 +19,7 @@ from agent.toolkit import MCPToolRegistry
 
 # 加载 .env 文件，确保 API Key 受到保护
 load_dotenv()
-model = whisper.load_model("base")
+model = whisper.load_model(os.getenv("LOCAL_ASR_MODEL", "small"))
 
 
 class MCPClient:
@@ -132,15 +133,27 @@ class MCPClient:
             return "语音文件不存在，请重新选择后再试。"
 
         try:
-            os.environ["FFMPEG_BINARY"] = r"D:\ffmpeg\bin\ffmpeg.exe"
+            asr_backend = os.getenv("ASR_BACKEND", "openai").strip().lower()
+            text = ""
 
-            result = model.transcribe(
-                audio_path,
-                language='zh',
-                task='transcribe',
-                fp16=False,
-            )
-            text = convert(result["text"], 'zh-cn')
+            if asr_backend == "openai" and self.openai_api_key and self.openai_api_key != "dummy-key":
+                with open(audio_path, "rb") as audio_file:
+                    transcript = self.client.audio.transcriptions.create(
+                        model=os.getenv("ASR_MODEL", "gpt-4o-mini-transcribe"),
+                        file=audio_file,
+                    )
+                    text = getattr(transcript, "text", "") or ""
+
+            if not text:
+                result = model.transcribe(
+                    audio_path,
+                    language='zh',
+                    task='transcribe',
+                    fp16=False,
+                )
+                text = result["text"]
+
+            text = convert(text, 'zh-cn')
 
             if not text:
                 return "未识别到语音内容，请重试。"
@@ -149,7 +162,7 @@ class MCPClient:
         except Exception as e:
             return f"语音识别失败: {e}"
 
-    def _build_attachment_context(self, file_path: str) -> str:
+    def _build_attachment_context(self, file_path: str) -> str | list[dict[str, Any]]:
         if not file_path:
             return ""
 
@@ -161,12 +174,12 @@ class MCPClient:
         filename = os.path.basename(file_path)
 
         if mime_type.startswith("image/"):
-            file_size = os.path.getsize(file_path)
-            return (
-                f"用户上传了一张图片：{filename}（MIME: {mime_type}, 大小: {file_size} bytes）。\n"
-                "当前接入的模型接口仅支持文本消息，无法直接读取图片像素内容。"
-                "请先基于用户问题给出可执行建议，并提示用户改为上传可读文本（如 txt/md）或补充图片文字描述。"
-            )
+            with open(file_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode("utf-8")
+            return [
+                {"type": "text", "text": f"用户上传了图片文件：{filename}，请结合用户问题进行分析。"},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}},
+            ]
 
         with open(file_path, "r", encoding="utf-8") as file:
             file_text = file.read()

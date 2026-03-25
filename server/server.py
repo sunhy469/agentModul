@@ -575,6 +575,51 @@ def analyze_time_series(values: list[float], horizon: int = 3) -> str:
     )
 
 
+@mcp.tool()
+async def send_webhook_message(
+    webhook_url: str,
+    text: str,
+    provider: str = "generic",
+) -> str:
+    """
+    发送 webhook 消息，可用于飞书/企业微信/自定义机器人通知。
+    """
+    if not webhook_url.startswith("http"):
+        return "webhook_url 必须是 http/https 地址。"
+    if not text.strip():
+        return "text 不能为空。"
+
+    provider_key = provider.strip().lower()
+    if provider_key in {"feishu", "lark"}:
+        payload = {"msg_type": "text", "content": {"text": text}}
+    else:
+        payload = {"text": text}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(webhook_url, json=payload)
+            content = resp.text[:300]
+            return f"Webhook 已发送，HTTP {resp.status_code}，响应片段：{content}"
+    except Exception as exc:
+        return f"Webhook 发送失败: {exc}"
+
+
+@mcp.tool()
+def summarize_local_capabilities() -> str:
+    """
+    返回当前可用于本地自动化的能力说明，便于多工具编排。
+    """
+    return (
+        "当前本地自动化能力：\n"
+        "1) 文件系统：查找/读取/列举/待确认修改删除。\n"
+        "2) 本地应用：按命令启动应用（可用于拉起 QQ、飞书、浏览器）。\n"
+        "3) 通知消息：支持 webhook 发送（飞书机器人/自定义服务）。\n"
+        "4) 文档处理：可创建 Word 文件并导出。\n"
+        "5) 时间序列：基础统计与趋势预测。\n"
+        "说明：若要实现“自动在 QQ 聊天窗口输入并发送”，建议再接入桌面自动化 MCP（按键/窗口控制）。"
+    )
+
+
 
 
 @mcp.tool()

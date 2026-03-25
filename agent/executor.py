@@ -33,22 +33,36 @@ class LangChainStyleAgentExecutor:
             "回答请保持结构化，优先中文，并结合压缩记忆和当前上下文共同推理。"
         )
 
-    def _compose_user_message(self, query: str, attachment_context: str = "") -> str:
-        parts = []
+    @staticmethod
+    def _serialize_for_memory(message: Any) -> str:
+        if isinstance(message, str):
+            return message
+        return json.dumps(message, ensure_ascii=False)
+
+    def _compose_user_message(self, query: str, attachment_context: Any = "") -> str | list[dict[str, Any]]:
+        parts: list[str] = []
         if query:
             parts.append(query)
-        if attachment_context:
+        if isinstance(attachment_context, str) and attachment_context:
             parts.append(attachment_context)
+        if isinstance(attachment_context, list):
+            text_part = "\n\n".join(parts).strip()
+            payload: list[dict[str, Any]] = []
+            if text_part:
+                payload.append({"type": "text", "text": text_part})
+            payload.extend(attachment_context)
+            return payload
         return "\n\n".join(parts).strip()
 
-    async def run(self, query: str, attachment_context: str = "", metadata: dict | None = None) -> str:
+    async def run(self, query: str, attachment_context: Any = "", metadata: dict | None = None) -> str:
         user_message = self._compose_user_message(query, attachment_context)
-        if not user_message:
+        if not user_message or (isinstance(user_message, list) and len(user_message) == 0):
             return "请输入问题或上传文件后再发送。"
 
-        allow_browser_search = self.tool_registry.is_browser_search_explicit(query)
-        require_browser_tools = self.tool_registry.is_browser_task(query)
-        has_explicit_url = bool(self.tool_registry.extract_urls(query))
+        plain_query = query or ""
+        allow_browser_search = self.tool_registry.is_browser_search_explicit(plain_query)
+        require_browser_tools = self.tool_registry.is_browser_task(plain_query)
+        has_explicit_url = bool(self.tool_registry.extract_urls(plain_query))
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._build_system_prompt()},
@@ -86,7 +100,7 @@ class LangChainStyleAgentExecutor:
                 if choice.finish_reason != "tool_calls":
                     final_answer = choice.message.content or "模型未返回内容。"
                     task_status = "completed"
-                    self.memory.save_turn(user_message, final_answer, metadata=metadata)
+                    self.memory.save_turn(self._serialize_for_memory(user_message), final_answer, metadata=metadata)
                     return final_answer
 
                 assistant_message = choice.message.model_dump()
@@ -98,7 +112,7 @@ class LangChainStyleAgentExecutor:
 
                     if tool_name == "search_web" and not allow_browser_search:
                         final_answer = "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
-                        self.memory.save_turn(user_message, final_answer, metadata=metadata)
+                        self.memory.save_turn(self._serialize_for_memory(user_message), final_answer, metadata=metadata)
                         return final_answer
 
                     if require_browser_tools and not has_explicit_url and self.tool_registry.contains_navigation_intent(tool_args):
@@ -137,7 +151,7 @@ class LangChainStyleAgentExecutor:
             if task_status != "completed":
                 task_status = "failed"
             self.memory.save_turn(
-                user_message,
+                self._serialize_for_memory(user_message),
                 f"{fallback}\n任务状态: {task_status}",
                 metadata=metadata,
             )
