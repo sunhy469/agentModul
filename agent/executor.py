@@ -130,6 +130,7 @@ class LangChainStyleAgentExecutor:
 
         try:
             task_status = "pending"
+            tool_call_repeat_counter: dict[str, int] = {}
             for _ in range(self.max_iterations):
                 task_status = "in_progress"
                 response = self.openai_client.chat.completions.create(
@@ -152,6 +153,21 @@ class LangChainStyleAgentExecutor:
                 for tool_call in choice.message.tool_calls or []:
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments or "{}")
+                    tool_sig = f"{tool_name}:{json.dumps(tool_args, ensure_ascii=False, sort_keys=True)}"
+                    repeated = tool_call_repeat_counter.get(tool_sig, 0)
+                    if repeated >= 2:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": (
+                                    "检测到相同工具参数被重复调用，已自动阻断以避免循环。"
+                                    "请改用不同参数或直接给出最终回答。"
+                                ),
+                                "tool_call_id": tool_call.id,
+                            }
+                        )
+                        continue
+                    tool_call_repeat_counter[tool_sig] = repeated + 1
 
                     if tool_name == "search_web" and not allow_browser_search:
                         final_answer = "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
