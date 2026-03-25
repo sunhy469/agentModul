@@ -802,6 +802,7 @@ def send_desktop_message(
         message: str,
         press_enter: bool = True,
         warmup_seconds: float = 1.5,
+        focus_input_click: bool = True,
 ) -> str:
     """
     桌面 IM 自动发送消息（QQ/飞书/企业微信等）。
@@ -822,14 +823,32 @@ def send_desktop_message(
     pyperclip.copy(message)
     time.sleep(max(0.5, min(warmup_seconds, 10.0)))
 
+    # 尝试将焦点切到聊天输入框（对 QQ/飞书等桌面 IM 更稳定）
+    if focus_input_click:
+        try:
+            screen_w, screen_h = pyautogui.size()
+            pyautogui.click(int(screen_w * 0.72), int(screen_h * 0.92))
+            time.sleep(0.2)
+        except Exception:
+            pass
+
     if platform.system().lower() == "darwin":
         pyautogui.hotkey("command", "v")
     else:
         pyautogui.hotkey("ctrl", "v")
+        # Windows 下部分场景 Ctrl+V 不生效，补一个 Shift+Insert 兜底
+        time.sleep(0.1)
+        pyautogui.hotkey("shift", "insert")
     if press_enter:
         pyautogui.press("enter")
+        time.sleep(0.05)
+        pyautogui.press("enter")
 
-    return f"{launch}\n已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
+    return (
+        f"{launch}\n"
+        f"已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
+        f"{'（已尝试点击输入框并使用双重粘贴兜底）' if focus_input_click else ''}"
+    )
 
 
 def _detect_channel_from_request(request: str) -> str:
