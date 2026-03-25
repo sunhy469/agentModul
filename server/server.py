@@ -577,19 +577,29 @@ def analyze_time_series(values: list[float], horizon: int = 3) -> str:
 
 @mcp.tool()
 async def send_webhook_message(
-    webhook_url: str,
     text: str,
+    webhook_url: str = "",
     provider: str = "generic",
 ) -> str:
     """
     发送 webhook 消息，可用于飞书/企业微信/自定义机器人通知。
     """
-    if not webhook_url.startswith("http"):
-        return "webhook_url 必须是 http/https 地址。"
     if not text.strip():
         return "text 不能为空。"
 
     provider_key = provider.strip().lower()
+    resolved_webhook = webhook_url.strip()
+    if not resolved_webhook:
+        if provider_key in {"feishu", "lark"}:
+            resolved_webhook = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+        else:
+            resolved_webhook = os.getenv("DEFAULT_WEBHOOK_URL", "").strip()
+    if not resolved_webhook.startswith("http"):
+        return (
+            "webhook_url 无效。请在参数传入 webhook_url，"
+            "或配置环境变量 FEISHU_WEBHOOK_URL / DEFAULT_WEBHOOK_URL。"
+        )
+
     if provider_key in {"feishu", "lark"}:
         payload = {"msg_type": "text", "content": {"text": text}}
     else:
@@ -597,9 +607,12 @@ async def send_webhook_message(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(webhook_url, json=payload)
+            resp = await client.post(resolved_webhook, json=payload)
             content = resp.text[:300]
-            return f"Webhook 已发送，HTTP {resp.status_code}，响应片段：{content}"
+            return (
+                f"Webhook 已发送，provider={provider_key or 'generic'}，HTTP {resp.status_code}，"
+                f"响应片段：{content}"
+            )
     except Exception as exc:
         return f"Webhook 发送失败: {exc}"
 
@@ -654,6 +667,62 @@ def send_desktop_message(
         pyautogui.press("enter")
 
     return f"{launch}\n已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
+
+
+def _detect_channel_from_request(request: str) -> str:
+    text = (request or "").lower()
+    if any(k in text for k in ["飞书", "feishu", "lark"]):
+        return "feishu"
+    if any(k in text for k in ["qq", "企鹅"]):
+        return "qq"
+    return "auto"
+
+
+@mcp.tool()
+async def send_message_by_request(
+    request: str,
+    message: str = "",
+    preferred_channel: str = "auto",
+    qq_app_command: str = "qq",
+    auto_send: bool = True,
+    webhook_url: str = "",
+) -> str:
+    """
+    根据请求自动选择飞书或 QQ 发送消息。
+    - 飞书：优先参数 webhook_url，否则读 FEISHU_WEBHOOK_URL
+    - QQ：调用桌面自动发送
+    """
+    channel = preferred_channel.strip().lower()
+    if channel == "auto":
+        channel = _detect_channel_from_request(request)
+    final_message = message.strip() or request.strip()
+    if not final_message:
+        return "消息内容为空，请提供 request 或 message。"
+
+    if channel in {"feishu", "lark"}:
+        return await send_webhook_message(
+            webhook_url=webhook_url,
+            text=final_message,
+            provider="feishu",
+        )
+    if channel == "qq":
+        return send_desktop_message(
+            app_command=qq_app_command,
+            message=final_message,
+            press_enter=auto_send,
+        )
+
+    if os.getenv("FEISHU_WEBHOOK_URL", "").strip():
+        return await send_webhook_message(
+            webhook_url=webhook_url,
+            text=final_message,
+            provider="feishu",
+        )
+    return send_desktop_message(
+        app_command=qq_app_command,
+        message=final_message,
+        press_enter=auto_send,
+    )
 
 
 
