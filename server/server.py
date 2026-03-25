@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -678,6 +679,25 @@ def _detect_channel_from_request(request: str) -> str:
     return "auto"
 
 
+def _extract_message_from_request(request: str) -> str:
+    text = (request or "").strip()
+    if not text:
+        return ""
+    quoted = re.findall(r"[\"“”']([^\"“”']+)[\"“”']", text)
+    if quoted:
+        return quoted[-1].strip()
+
+    patterns = [
+        r"(?:发送|发|send)\s*(.+?)\s*(?:到|给).*(?:飞书|lark|qq)",
+        r"(?:在|往).*(?:飞书|lark|qq).*(?:发送|发)\s*(.+)",
+    ]
+    for pattern in patterns:
+        matched = re.search(pattern, text, re.IGNORECASE)
+        if matched:
+            return matched.group(1).strip("：: ，,。.!！")
+    return text
+
+
 @mcp.tool()
 async def send_message_by_request(
     request: str,
@@ -695,7 +715,7 @@ async def send_message_by_request(
     channel = preferred_channel.strip().lower()
     if channel == "auto":
         channel = _detect_channel_from_request(request)
-    final_message = message.strip() or request.strip()
+    final_message = message.strip() or _extract_message_from_request(request)
     if not final_message:
         return "消息内容为空，请提供 request 或 message。"
 

@@ -2,6 +2,7 @@ import mimetypes
 import os
 import shlex
 import base64
+import re
 from contextlib import AsyncExitStack
 from typing import Optional, Any
 
@@ -191,6 +192,11 @@ class MCPClient:
         if not self.agent_executor:
             return "智能体尚未初始化，请先连接服务器。"
 
+        direct_result = await self._try_direct_message_send(query)
+        if direct_result is not None:
+            self.memory.save_turn(query, direct_result, metadata={"direct_dispatch": True})
+            return direct_result
+
         try:
             attachment_context = self._build_attachment_context(file_path) if file_path else ""
         except UnicodeDecodeError:
@@ -204,6 +210,26 @@ class MCPClient:
             query=display_query,
             attachment_context=attachment_context,
             metadata=metadata,
+        )
+
+    async def _try_direct_message_send(self, query: str) -> str | None:
+        """
+        直接消息派发捷径：当用户明确表达“发到飞书/QQ”时，绕过大模型，直接调用工具。
+        """
+        if not query or not self.tool_registry:
+            return None
+        lowered = query.lower()
+        has_send_intent = bool(re.search(r"(发送|发|send).*(消息|通知|message)?", lowered))
+        has_channel = any(key in lowered for key in ["飞书", "lark", "qq", "企鹅"])
+        if not (has_send_intent and has_channel):
+            return None
+        return await self.tool_registry.call_tool(
+            "send_message_by_request",
+            {
+                "request": query,
+                "preferred_channel": "auto",
+                "auto_send": True,
+            },
         )
 
     def clear_memory(self) -> None:
