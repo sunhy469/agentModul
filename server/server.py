@@ -671,6 +671,8 @@ def _detect_channel_from_request(request: str) -> str:
         return "feishu"
     if any(k in text for k in ["qq", "企鹅"]):
         return "qq"
+    if any(k in text for k in ["facebook", "messenger", "meta"]):
+        return "unsupported"
     return "auto"
 
 
@@ -694,6 +696,9 @@ async def send_message_by_request(
     if not final_message:
         return "消息内容为空，请提供 request 或 message。"
 
+    if channel == "unsupported":
+        return "检测到目标为 Facebook/Messenger，当前仅支持飞书 webhook 与 QQ 桌面发送。"
+
     if channel in {"feishu", "lark"}:
         return await send_webhook_message(
             text=final_message,
@@ -706,15 +711,9 @@ async def send_message_by_request(
             press_enter=auto_send,
         )
 
-    if os.getenv("FEISHU_WEBHOOK_URL", "").strip():
-        return await send_webhook_message(
-            text=final_message,
-            provider="feishu",
-        )
-    return send_desktop_message(
-        app_command=qq_app_command,
-        message=final_message,
-        press_enter=auto_send,
+    return (
+        "未识别发送渠道。请在请求中明确写“飞书”或“QQ”，"
+        "或传 preferred_channel='feishu' / 'qq'。"
     )
 
 
