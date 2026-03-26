@@ -7,9 +7,11 @@ import shutil
 import subprocess
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any
+from urllib.parse import quote_plus
 
 import httpx
 from docx import Document
@@ -31,6 +33,72 @@ os.makedirs(BASE_DIR, exist_ok=True)
 SAFE_ROOT = Path(os.getenv("SAFE_WORK_ROOT", BASE_DIR)).expanduser().resolve()
 PENDING_FILE_OPERATIONS: dict[str, dict[str, Any]] = {}
 FEISHU_TOKEN_CACHE: dict[str, Any] = {"token": "", "expire_at": 0.0}
+
+
+async def _search_arxiv(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    url = (
+        "http://export.arxiv.org/api/query"
+        f"?search_query=all:{quote_plus(query)}&start=0&max_results={max(1, min(max_results, 10))}"
+    )
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(url, headers={"User-Agent": USER_AGENT})
+        resp.raise_for_status()
+
+    root = ET.fromstring(resp.text)
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    entries = root.findall("atom:entry", ns)
+    results: list[dict[str, str]] = []
+    for entry in entries:
+        title = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip().replace("\n", " ")
+        summary = (entry.findtext("atom:summary", default="", namespaces=ns) or "").strip().replace("\n", " ")
+        link = ""
+        for ln in entry.findall("atom:link", ns):
+            href = ln.attrib.get("href", "")
+            rel = ln.attrib.get("rel", "")
+            if href and (rel == "alternate" or "arxiv.org/abs/" in href):
+                link = href
+                break
+        if not link:
+            link = (entry.findtext("atom:id", default="", namespaces=ns) or "").strip()
+        if title:
+            results.append({"title": title, "summary": summary[:280], "url": link})
+    return results
+
+
+async def _search_duckduckgo(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    params = {
+        "q": query,
+        "format": "json",
+        "no_html": "1",
+        "skip_disambig": "1",
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get("https://api.duckduckgo.com/", params=params, headers={"User-Agent": USER_AGENT})
+        resp.raise_for_status()
+        data = resp.json()
+
+    items: list[dict[str, str]] = []
+    for topic in data.get("RelatedTopics", []):
+        if isinstance(topic, dict) and "Topics" in topic:
+            for sub in topic.get("Topics", []):
+                text = (sub.get("Text") or "").strip()
+                url = (sub.get("FirstURL") or "").strip()
+                if text and url:
+                    items.append({"title": text, "summary": "", "url": url})
+        else:
+            text = (topic.get("Text") or "").strip() if isinstance(topic, dict) else ""
+            url = (topic.get("FirstURL") or "").strip() if isinstance(topic, dict) else ""
+            if text and url:
+                items.append({"title": text, "summary": "", "url": url})
+        if len(items) >= max_results:
+            break
+
+    abstract = (data.get("AbstractText") or "").strip()
+    abstract_url = (data.get("AbstractURL") or "").strip()
+    if abstract and abstract_url:
+        items.insert(0, {"title": abstract[:120], "summary": abstract[:280], "url": abstract_url})
+
+    return items[:max(1, min(max_results, 10))]
 
 
 async def fetch_weather(city: str) -> dict[str, Any] | None:
@@ -830,10 +898,52 @@ def summarize_local_capabilities() -> str:
         "1) 文件系统：查找/读取/列举/待确认修改删除。\n"
         "2) 本地应用：按命令启动应用（可用于拉起 QQ、飞书、浏览器）。\n"
         "3) 通知消息：支持飞书机器人发送。\n"
-        "4) 桌面 IM：支持自动粘贴并发送消息（依赖 pyautogui + pyperclip）。\n"
-        "5) 文档处理：可创建 Word 文件并导出。\n"
-        "6) 时间序列：基础统计与趋势预测。"
+        "4) 在线检索：支持通用网页检索与 arXiv 论文检索。\n"
+        "5) 桌面 IM：支持自动粘贴并发送消息（依赖 pyautogui + pyperclip）。\n"
+        "6) 文档处理：可创建 Word 文件并导出。\n"
+        "7) 时间序列：基础统计与趋势预测。"
     )
+
+
+@mcp.tool()
+async def search_web(query: str, max_results: int = 5, source: str = "auto") -> str:
+    """
+    在线检索工具。
+    - source=auto: 自动判断，学术相关优先 arXiv
+    - source=arxiv: 仅检索 arXiv
+    - source=web: 通用网页检索（DuckDuckGo API）
+    """
+    q = (query or "").strip()
+    if not q:
+        return "请提供 query。"
+
+    source_norm = (source or "auto").strip().lower()
+    if source_norm not in {"auto", "arxiv", "web"}:
+        source_norm = "auto"
+
+    is_academic_query = any(k in q.lower() for k in ["论文", "文献", "arxiv", "paper", "scholar", "attention", "k-means"])
+    if source_norm == "auto":
+        source_norm = "arxiv" if is_academic_query else "web"
+
+    try:
+        results = await (_search_arxiv(q, max_results) if source_norm == "arxiv" else _search_duckduckgo(q, max_results))
+    except Exception as exc:
+        return f"在线检索失败: {exc}"
+
+    if not results:
+        return f"未检索到结果。query={q}，source={source_norm}"
+
+    lines = [f"检索来源: {source_norm}", f"query: {q}", f"结果数: {len(results)}"]
+    for i, item in enumerate(results, start=1):
+        title = item.get("title", "")
+        summary = item.get("summary", "")
+        url = item.get("url", "")
+        lines.append(f"{i}. {title}")
+        if summary:
+            lines.append(f"   摘要: {summary}")
+        if url:
+            lines.append(f"   链接: {url}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
