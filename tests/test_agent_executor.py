@@ -41,7 +41,7 @@ class FakeToolRegistry:
     def contains_navigation_intent(_value):
         return False
 
-    async def format_openai_tools(self, _allow_browser_search):
+    async def format_openai_tools(self, _allow_browser_search, _user_query=""):
         return [{"type": "function", "function": {"name": "echo", "parameters": {}}}]
 
     async def call_tool(self, tool_name, tool_args):

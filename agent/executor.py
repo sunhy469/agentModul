@@ -131,7 +131,7 @@ class LangChainStyleAgentExecutor:
                 },
             )
 
-        available_tools = await self.tool_registry.format_openai_tools(allow_browser_search)
+        available_tools = await self.tool_registry.format_openai_tools(allow_browser_search, plain_query)
 
         try:
             task_status = "pending"
