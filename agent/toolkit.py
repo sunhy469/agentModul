@@ -60,9 +60,13 @@ class MCPToolRegistry:
         q = (query or "").lower()
         triggers = [
             "在浏览器", "浏览器中", "打开浏览器", "用浏览器", "browser",
-            "search_web", "网页搜索", "上网搜", "去搜索引擎",
+            "search_web", "网页搜索", "上网搜", "去搜索引擎", "联网", "在线",
+            "arxiv", "google scholar", "谷歌学术", "scholar", "论文检索", "文献检索",
         ]
-        actions = ["搜索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query"]
+        actions = [
+            "搜索", "检索", "查一下", "查一查", "搜一下", "搜一搜", "search", "query",
+            "找", "收集", "整理", "论文", "文献",
+        ]
         return any(t in q for t in triggers) and any(a in q for a in actions)
 
     @staticmethod

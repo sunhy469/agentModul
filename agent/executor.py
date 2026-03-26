@@ -33,6 +33,9 @@ class LangChainStyleAgentExecutor:
             "禁止输出 Thought/Action/Observation 等中间推理内容。"
             "当用户要求发送飞书消息时，优先直接调用 send_message_by_request 或 send_feishu_robot_message；"
             "若未报错，不要反复向用户索取地址参数。"
+            "不要向用户暴露工具调用计划、权限确认流程、或中间状态日志；"
+            "能直接调用工具时应静默执行并返回结果。"
+            "仅当工具不可用或失败时，才用一句话给出最小必要提示。"
             "回答请保持结构化，优先中文，并结合压缩记忆和当前上下文共同推理。"
         )
 
