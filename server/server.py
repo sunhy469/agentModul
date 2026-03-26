@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -397,6 +398,45 @@ def _open_with_default_app(target: Path) -> None:
         subprocess.Popen(["xdg-open", str(target)])
 
 
+def _is_windows_process_running(process_names: list[str]) -> bool:
+    if platform.system().lower() != "windows":
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        output = (result.stdout or "").lower()
+        return any(name.lower() in output for name in process_names)
+    except Exception:
+        return False
+
+
+def _wait_for_qq_window(timeout_seconds: float = 15.0) -> tuple[tuple[int, int, int, int] | None, str]:
+    """等待 QQ 窗口可操作后返回窗口位置。"""
+    deadline = time.time() + max(1.0, timeout_seconds)
+    while time.time() < deadline:
+        try:
+            import pygetwindow as gw
+            windows = gw.getWindowsWithTitle("QQ")
+            for w in windows:
+                if w.width > 200 and w.height > 200:
+                    if w.isMinimized:
+                        w.restore()
+                    try:
+                        w.activate()
+                    except Exception:
+                        pass
+                    return (w.left, w.top, w.width, w.height), ""
+        except Exception:
+            return None, "缺少 pygetwindow 或窗口探测失败，无法确认 QQ 是否完全就绪。"
+        time.sleep(0.25)
+    return None, f"等待 QQ 窗口超时（{timeout_seconds:.1f}s），任务未完成。"
+
+
 @mcp.tool()
 def read_file(file_path: str, open_with_default: bool = True) -> str:
     """
@@ -703,7 +743,7 @@ async def _upload_feishu_image(
     return image_key, ""
 
 
-async def   _send_feishu_message(
+async def _send_feishu_message(
         message: str,
         link_text: str = "",
         link_href: str = "",
@@ -802,6 +842,11 @@ def send_desktop_message(
         message: str,
         press_enter: bool = True,
         warmup_seconds: float = 1.5,
+        focus_input_click: bool = True,
+        conversation_name: str = "",
+        relaunch_if_running: bool = False,
+        wait_ready_seconds: float = 15.0,
+        post_action_wait_seconds: float = 0.8,
 ) -> str:
     """
     桌面 IM 自动发送消息（QQ/飞书/企业微信等）。
@@ -818,18 +863,87 @@ def send_desktop_message(
     except Exception:
         return "缺少依赖：请安装 pyautogui 与 pyperclip 后重试。"
 
-    launch = open_local_application(app_command, "")
-    pyperclip.copy(message)
+    running = _is_windows_process_running(["QQ.exe", "QQNT.exe", "QQScLauncher.exe"]) if app_command.lower() == "qq" else False
+    if running and not relaunch_if_running:
+        launch = "检测到 QQ 已在运行，跳过重复启动。"
+    else:
+        launch = open_local_application(app_command, "")
     time.sleep(max(0.5, min(warmup_seconds, 10.0)))
 
-    if platform.system().lower() == "darwin":
+    qq_window_box: tuple[int, int, int, int] | None = None
+    steps: list[str] = [launch]
+    if app_command.lower() == "qq":
+        qq_window_box, qq_err = _wait_for_qq_window(timeout_seconds=wait_ready_seconds)
+        if qq_err:
+            return f"{launch}\n{qq_err}"
+        steps.append("QQ 窗口已就绪。")
+
+    # 若提供会话名，先在 IM 中搜索并进入对应会话
+    if conversation_name.strip():
+        if app_command.lower() == "qq" and qq_window_box:
+            left, top, width, _ = qq_window_box
+            # 点击 QQ 搜索框
+            pyautogui.click(left + int(width * 0.24), top + 36)
+            time.sleep(0.1)
+            pyautogui.hotkey("ctrl", "a")
+            pyautogui.press("backspace")
+            pyautogui.write(conversation_name.strip(), interval=0.03)
+            time.sleep(0.2)
+            pyautogui.press("enter")
+            time.sleep(0.3)
+            # 点击第一条会话，确保真正进入聊天
+            pyautogui.click(left + int(width * 0.24), top + 126)
+            time.sleep(0.2)
+            steps.append(f"已执行 QQ 搜索并尝试进入会话：{conversation_name.strip()}")
+        elif platform.system().lower() == "darwin":
+            pyperclip.copy(conversation_name.strip())
+            pyautogui.hotkey("command", "f")
+            time.sleep(0.1)
+            pyautogui.hotkey("command", "v")
+        else:
+            pyperclip.copy(conversation_name.strip())
+            pyautogui.hotkey("ctrl", "f")
+            time.sleep(0.1)
+            pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.2)
+        pyautogui.press("enter")
+        time.sleep(0.4)
+
+    # 尝试将焦点切到聊天输入框（对 QQ/飞书等桌面 IM 更稳定）
+    if focus_input_click:
+        try:
+            if app_command.lower() == "qq" and qq_window_box:
+                left, top, width, height = qq_window_box
+                pyautogui.click(left + int(width * 0.70), top + int(height * 0.86))
+            else:
+                screen_w, screen_h = pyautogui.size()
+                pyautogui.click(int(screen_w * 0.72), int(screen_h * 0.92))
+            time.sleep(0.2)
+        except Exception:
+            pass
+
+    # 优先采用“键盘输入”，仅在非 ASCII 文本时回退剪贴板粘贴
+    if message.isascii():
+        pyautogui.write(message, interval=0.01)
+    elif platform.system().lower() == "darwin":
+        pyperclip.copy(message)
         pyautogui.hotkey("command", "v")
     else:
+        pyperclip.copy(message)
         pyautogui.hotkey("ctrl", "v")
+        # Windows 下部分场景 Ctrl+V 不生效，补一个 Shift+Insert 兜底
+        time.sleep(0.1)
+        pyautogui.hotkey("shift", "insert")
     if press_enter:
         pyautogui.press("enter")
+        time.sleep(0.05)
+        pyautogui.press("enter")
+        steps.append("已执行回车发送。")
 
-    return f"{launch}\n已自动粘贴消息并{'发送' if press_enter else '停留待确认'}。"
+    time.sleep(max(0.0, min(post_action_wait_seconds, 5.0)))
+    steps.append("桌面自动化步骤执行完毕。")
+
+    return "\n".join(steps)
 
 
 def _detect_channel_from_request(request: str) -> str:
@@ -841,6 +955,20 @@ def _detect_channel_from_request(request: str) -> str:
     if any(k in text for k in ["facebook", "messenger", "meta"]):
         return "unsupported"
     return "auto"
+
+
+def _extract_qq_target_and_message(request: str, fallback_message: str = "") -> tuple[str, str]:
+    text = (request or "").strip()
+    if not text:
+        return "", fallback_message.strip()
+
+    # 例：在qq找一下bamboo这个人，和他说，让他明天下午来找我
+    m = re.search(r"(?:找(?:一下)?)([^，。,.\s]+)(?:这个人)?(?:，|,)?(?:和他说|并?告诉他|对他说|说)[:：，,]?(.*)", text)
+    if m:
+        name = (m.group(1) or "").strip()
+        content = (m.group(2) or "").strip() or fallback_message.strip()
+        return name, content
+    return "", fallback_message.strip() or text
 
 
 @mcp.tool()
@@ -869,16 +997,20 @@ async def send_message_by_request(
     if channel in {"feishu", "lark"}:
         return await send_feishu_robot_message(message=final_message)
     if channel == "qq":
+        target_name, qq_message = _extract_qq_target_and_message(request, fallback_message=message.strip() or final_message)
         return send_desktop_message(
             app_command=qq_app_command,
-            message=final_message,
+            message=qq_message or final_message,
             press_enter=auto_send,
+            conversation_name=target_name,
         )
 
     return (
         "未识别发送渠道。请在请求中明确写“飞书”或“QQ”，"
         "或传 preferred_channel='feishu' / 'qq'。"
     )
+
+
 
 
 @mcp.tool()

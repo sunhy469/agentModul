@@ -2,6 +2,7 @@ import mimetypes
 import os
 import shlex
 import base64
+import shutil
 from contextlib import AsyncExitStack
 from typing import Optional, Any
 
@@ -111,6 +112,55 @@ class MCPClient:
                 print("\n已接入 Browser MCP，新增工具:", [tool.name for tool in browser_tools])
             except Exception as e:
                 print(f"\n⚠️ Browser MCP 启动失败，已降级为仅本地工具: {e}")
+
+        windows_enabled = os.getenv("ENABLE_WINDOWS_MCP", "0").strip().lower() in {"1", "true", "yes"}
+        if windows_enabled:
+            windows_cmd = os.getenv("WINDOWS_MCP_COMMAND", "uv")
+            raw_args = os.getenv("WINDOWS_MCP_ARGS", "")
+            if raw_args.strip():
+                windows_args = shlex.split(raw_args)
+            else:
+                windows_dir = os.getenv("WINDOWS_MCP_DIR", "").strip()
+                if windows_dir:
+                    # 对齐 Cursor MCP 配置风格：
+                    # command: uv
+                    # args: ["--directory", "C:/AI/Windows-MCP", "run", "main.py"]
+                    windows_args = ["--directory", windows_dir, "run", "main.py"]
+                else:
+                    print("\n⚠️ ENABLE_WINDOWS_MCP 已开启，但未配置 WINDOWS_MCP_ARGS 或 WINDOWS_MCP_DIR，跳过接入。")
+                    windows_args = []
+
+            if windows_args:
+                # 兼容：若 uv 不在 PATH，回退到 `python -m uv`
+                if not shutil.which(windows_cmd):
+                    if windows_cmd in {"uv", "uvx"} and shutil.which("python"):
+                        print(f"\n⚠️ 未找到命令 {windows_cmd}，自动回退为 `python -m uv`。")
+                        windows_cmd = "python"
+                        windows_args = ["-m", "uv", *windows_args]
+                    else:
+                        fallback_cmd = "python"
+                        if shutil.which(fallback_cmd):
+                            print(f"\n⚠️ 未找到命令 {windows_cmd}，自动回退为 {fallback_cmd}。")
+                            windows_cmd = fallback_cmd
+
+                # 兼容：若 args 仅是 *.py 脚本路径，则应使用 python 执行而非 uv
+                if (
+                        len(windows_args) == 1
+                        and str(windows_args[0]).lower().endswith(".py")
+                        and windows_cmd in {"uv", "uvx"}
+                ):
+                    if shutil.which("python"):
+                        print("\n⚠️ 检测到 WINDOWS_MCP_ARGS 为 Python 脚本路径，自动改为 python 执行。")
+                        windows_cmd = "python"
+
+                try:
+                    windows_tools = await self._connect_stdio_server("windows", windows_cmd, windows_args)
+                    for tool in windows_tools:
+                        self.tool_to_session[tool.name] = self.sessions["windows"]
+                        all_tools.append(tool)
+                    print("\n已接入 Windows MCP，新增工具:", [tool.name for tool in windows_tools])
+                except Exception as e:
+                    print(f"\n⚠️ Windows MCP 启动失败，已降级为仅现有工具: {e}")
 
         self.tool_registry = MCPToolRegistry(
             sessions=self.sessions,
