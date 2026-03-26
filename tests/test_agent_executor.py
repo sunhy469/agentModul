@@ -90,6 +90,68 @@ class AgentExecutorTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, "最终答案")
             self.assertEqual(memory.load_messages()[-1].content, "最终答案")
 
+    async def test_duplicate_side_effect_tool_is_blocked(self):
+        first_tool_msg = SimpleNamespace(
+            content=None,
+            tool_calls=[
+                SimpleNamespace(
+                    id="call-1",
+                    function=SimpleNamespace(name="send_message_by_request", arguments=json.dumps({"request": "发消息"})),
+                )
+            ],
+            model_dump=lambda: {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "send_message_by_request", "arguments": json.dumps({"request": "发消息"})},
+                    }
+                ],
+            },
+        )
+        second_tool_msg = SimpleNamespace(
+            content=None,
+            tool_calls=[
+                SimpleNamespace(
+                    id="call-2",
+                    function=SimpleNamespace(name="send_message_by_request", arguments=json.dumps({"request": "发消息"})),
+                )
+            ],
+            model_dump=lambda: {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "send_message_by_request", "arguments": json.dumps({"request": "发消息"})},
+                    }
+                ],
+            },
+        )
+        final_message = SimpleNamespace(content="已完成", tool_calls=[])
+        responses = [
+            SimpleNamespace(choices=[SimpleNamespace(finish_reason="tool_calls", message=first_tool_msg)]),
+            SimpleNamespace(choices=[SimpleNamespace(finish_reason="tool_calls", message=second_tool_msg)]),
+            SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=final_message)]),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory = FileConversationMemory(Path(tmpdir) / "memory.json")
+            registry = FakeToolRegistry()
+            executor = LangChainStyleAgentExecutor(
+                openai_client=FakeOpenAIClient(responses),
+                model="fake-model",
+                tool_registry=registry,
+                memory=memory,
+            )
+
+            result = await executor.run("帮我发送一次消息")
+            self.assertEqual(result, "已完成")
+            self.assertEqual(len(registry.calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

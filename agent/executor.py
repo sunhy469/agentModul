@@ -16,13 +16,15 @@ class LangChainStyleAgentExecutor:
             model: str,
             tool_registry: MCPToolRegistry,
             memory: FileConversationMemory,
-            max_iterations: int = 9999,
+            max_iterations: int = 16,
+            max_tool_calls: int = 24,
     ):
         self.openai_client = openai_client
         self.model = model
         self.tool_registry = tool_registry
         self.memory = memory
         self.max_iterations = max_iterations
+        self.max_tool_calls = max_tool_calls
 
     def _build_system_prompt(self) -> str:
         return (
@@ -133,6 +135,10 @@ class LangChainStyleAgentExecutor:
 
         try:
             task_status = "pending"
+            tool_call_counts: dict[str, int] = {}
+            total_tool_calls = 0
+            duplicate_rounds = 0
+            side_effect_tools = {"send_feishu_robot_message", "send_message_by_request", "send_desktop_message"}
             for _ in range(self.max_iterations):
                 task_status = "in_progress"
                 response = self.openai_client.chat.completions.create(
@@ -152,9 +158,29 @@ class LangChainStyleAgentExecutor:
                 assistant_message = choice.message.model_dump()
                 messages.append(assistant_message)
 
+                blocked_in_this_round = 0
                 for tool_call in choice.message.tool_calls or []:
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments or "{}")
+                    signature = f"{tool_name}:{json.dumps(tool_args, ensure_ascii=False, sort_keys=True)}"
+
+                    max_repeat = 1 if tool_name in side_effect_tools else 2
+                    current_count = tool_call_counts.get(signature, 0)
+                    if current_count >= max_repeat:
+                        blocked_in_this_round += 1
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": "重复工具调用已拦截，请基于现有结果直接给出最终答案。",
+                                "tool_call_id": tool_call.id,
+                            }
+                        )
+                        continue
+
+                    if total_tool_calls >= self.max_tool_calls:
+                        fallback = "工具调用次数过多，已自动停止。请缩小任务范围后重试。"
+                        self.memory.save_turn(self._serialize_for_memory(user_message), fallback, metadata=metadata)
+                        return fallback
 
                     if tool_name == "search_web" and not allow_browser_search:
                         final_answer = "你没有明确要求“在浏览器中搜索”，我已按普通问答处理（未打开浏览器）。"
@@ -175,6 +201,8 @@ class LangChainStyleAgentExecutor:
                         continue
 
                     try:
+                        tool_call_counts[signature] = current_count + 1
+                        total_tool_calls += 1
                         tool_text = await self.tool_registry.call_tool(tool_name, tool_args)
                     except Exception as tool_exc:
                         # 对短暂失败做一次轻量重试
@@ -193,6 +221,16 @@ class LangChainStyleAgentExecutor:
                             "tool_call_id": tool_call.id,
                         }
                     )
+
+                if blocked_in_this_round > 0:
+                    duplicate_rounds += 1
+                else:
+                    duplicate_rounds = 0
+
+                if duplicate_rounds >= 2:
+                    fallback = "检测到重复工具调用，已停止自动重试。请确认目标后我将继续。"
+                    self.memory.save_turn(self._serialize_for_memory(user_message), fallback, metadata=metadata)
+                    return fallback
 
             fallback = "已达到最大工具调用轮次，请缩小问题范围后再试。"
             if task_status != "completed":
