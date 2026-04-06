@@ -772,14 +772,14 @@ async def _send_feishu_message(
             "content": {"image_key": image_key}
         }
     elif link_text.strip() and link_href.strip():
-        nodes: list[dict[str, Any]] = [{"tag": "text", "text": message}]
-        nodes.append({"tag": "a", "text": link_text.strip(), "href": link_href.strip()})
+        nodes: list[dict[str, Any]] = [{"tag": "text", "text": message},
+                                       {"tag": "a", "text": link_text.strip(), "href": link_href.strip()}]
         payload = {
             "msg_type": "post",
             "content": {
                 "post": {
                     "zh_cn": {
-                        "title": "",
+                        "title": "公告",
                         "content": [nodes]
                     }
                 }
@@ -994,7 +994,7 @@ async def send_message_by_request(
     if channel == "unsupported":
         return "检测到目标为 Facebook/Messenger，当前仅支持飞书机器人与 QQ 桌面发送。"
 
-    if channel in {"feishu", "lark"}:
+    if channel in {"feishu", "lark","飞书"}:
         return await send_feishu_robot_message(message=final_message)
     if channel == "qq":
         target_name, qq_message = _extract_qq_target_and_message(request, fallback_message=message.strip() or final_message)
